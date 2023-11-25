@@ -7639,7 +7639,7 @@ public:
 
 extern Target target;
 
-extern Type* getTypeInfoType(const Loc& loc, Type* t, Scope* sc, bool genObjCode = true);
+extern Type* getTypeInfoType(const Loc& loc, Type* t, Scope* sc);
 
 class SemanticTimeTransitiveVisitor : public SemanticTimePermissiveVisitor
 {
