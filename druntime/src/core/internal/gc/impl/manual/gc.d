@@ -98,7 +98,7 @@ class ManualGC : GC
         return 0;
     }
 
-    void* malloc(size_t size, uint bits, const TypeInfo ti) nothrow
+    void* malloc(size_t size, uint bits, const void* context, immutable size_t* pointerBitmap) nothrow
     {
         void* p = cstdlib.malloc(size);
 
@@ -110,13 +110,13 @@ class ManualGC : GC
     BlkInfo qalloc(size_t size, uint bits, const scope TypeInfo ti) nothrow
     {
         BlkInfo retval;
-        retval.base = malloc(size, bits, ti);
+        retval.base = GC.malloc(size, bits, ti);
         retval.size = size;
         retval.attr = bits;
         return retval;
     }
 
-    void* calloc(size_t size, uint bits, const TypeInfo ti) nothrow
+    void* calloc(size_t size, uint bits, const void *context, immutable size_t *pointerBitmap) nothrow
     {
         void* p = cstdlib.calloc(1, size);
 
@@ -125,7 +125,7 @@ class ManualGC : GC
         return p;
     }
 
-    void* realloc(void* p, size_t size, uint bits, const TypeInfo ti) nothrow
+    void* realloc(void* p, size_t size, uint bits, immutable size_t *pointerBitmap) nothrow
     {
         p = cstdlib.realloc(p, size);
 
@@ -134,7 +134,7 @@ class ManualGC : GC
         return p;
     }
 
-    size_t extend(void* p, size_t minsize, size_t maxsize, const TypeInfo ti) nothrow
+    size_t extend(void* p, size_t minsize, size_t maxsize) nothrow
     {
         return 0;
     }
@@ -266,5 +266,15 @@ class ManualGC : GC
     ulong allocatedInCurrentThread() nothrow
     {
         return typeof(return).init;
+    }
+
+    ArrayMetadata getArrayMetadata(void *ptr)
+    {
+        return ArrayMetadata.init;
+    }
+
+    bool setArrayUsed(ArrayMetadata metadata)
+    {
+        return false;
     }
 }

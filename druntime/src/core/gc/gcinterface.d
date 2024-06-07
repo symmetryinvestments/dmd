@@ -36,6 +36,41 @@ struct Range
     bool opEquals(const scope Range rhs) nothrow const { return pbot == rhs.pbot; }
 }
 
+private void setupContextAndBitmap(uint bits, const TypeInfo ti, ref const(void) *context, ref immutable(size_t) *ptrBitmap) nothrow
+{
+    if (ti !is null)
+    {
+        context = (bits & BlkAttr.STRUCTFINAL) ? cast(void *)ti : null;
+        ptrBitmap = cast(immutable size_t *)ti.rtInfo();
+    }
+    else
+    {
+        context = null;
+        ptrBitmap = cast(immutable size_t *)rtinfoHasPointers; // note the bits
+    }
+}
+
+// Array metadata is used to manage the array information of a block.
+struct ArrayMetadata
+{
+    size_t used;
+    const(void)* base() { return _base; }
+    size_t size() const pure @safe @nogc nothrow {
+        static if(size_t.sizeof == 8)
+
+            // 48 bits for length
+            return _flags & 0x0000_ffff_ffff_ffff;
+        else
+            // 31 bits for length
+            return _flags & 0x7fff_ffff;
+    }
+
+    package(core) {
+        void *_base;
+        size_t _flags;
+    }
+}
+
 interface GC
 {
     /**
@@ -74,24 +109,65 @@ interface GC
     uint clrAttr(void* p, uint mask) nothrow;
 
     /**
+     * malloc based on using a TypeInfo. This forwards to malloc with the
+     * appropriate runtime pointer for the context, and the pointer
+     * bitmap based on TypeInfo.RTInfo.
      *
+     * The bits determine how TypeInfo is passed according to the
+     * original rules of the GC.
      */
-    void* malloc(size_t size, uint bits, const TypeInfo ti) nothrow;
+    final void* malloc(size_t size, uint bits, const TypeInfo ti) nothrow
+    {
+        const(void) *context;
+        immutable(size_t) *ptrBitmap;
+        setupContextAndBitmap(bits, ti, context, ptrBitmap);
+        return malloc(size, bits, context, ptrBitmap);
+    }
+
+    /**
+     * Newer version of malloc that decouples from TypeInfo. Note that
+     * STRUCTFINAL is ignored in the bits.
+     */
+    void *malloc(size_t size, uint bits, const void *finalizer, immutable size_t *pointerbitmap) nothrow;
 
     /*
      *
      */
     BlkInfo qalloc(size_t size, uint bits, const scope TypeInfo ti) nothrow;
 
-    /*
-     *
+    /**
+     * Same as malloc, but zero-initializes the data
      */
-    void* calloc(size_t size, uint bits, const TypeInfo ti) nothrow;
+    final void* calloc(size_t size, uint bits, const TypeInfo ti) nothrow
+    {
+        const(void) *context;
+        immutable(size_t) *ptrBitmap;
+        setupContextAndBitmap(bits, ti, context, ptrBitmap);
+        return calloc(size, bits, context, ptrBitmap);
+    }
+
+    /// ditto
+    void* calloc(size_t size, uint bits, const void* context, immutable size_t* pointerBitmap) nothrow;
 
     /*
-     *
+     * realloc a block. The original block is freed.
      */
-    void* realloc(void* p, size_t size, uint bits, const TypeInfo ti) nothrow;
+    final void* realloc(void* p, size_t size, uint bits, const TypeInfo ti) nothrow
+    {
+        immutable(size_t) *ptrBitmap;
+        // no context pointer for realloc (it's not allowed)
+        if (ti !is null)
+        {
+            ptrBitmap = cast(immutable size_t*)ti.rtInfo();
+        }
+        else
+        {
+            ptrBitmap = cast(immutable size_t*)rtinfoHasPointers;
+        }
+        return realloc(p, size, bits, ptrBitmap);
+    }
+
+    void* realloc(void* p, size_t size, uint bits, immutable size_t *ptrBitmap) nothrow;
 
     /**
      * Attempt to in-place enlarge the memory block pointed to by p by at least
@@ -102,7 +178,7 @@ interface GC
      *  0 if could not extend p,
      *  total size of entire memory block if successful.
      */
-    size_t extend(void* p, size_t minsize, size_t maxsize, const TypeInfo ti) nothrow;
+    size_t extend(void* p, size_t minsize, size_t maxsize) nothrow;
 
     /**
      *
@@ -190,4 +266,17 @@ interface GC
      * GC.stats().allocatedInCurrentThread, but faster.
      */
     ulong allocatedInCurrentThread() nothrow;
+
+    /**
+     * Get array metadata for a specific pointer. Note that the resulting
+     * metadata will point at the block start, not the pointer.
+     */
+    ArrayMetadata getArrayMetadata(void *);
+
+    /**
+     * Set the array used data size. You must use a metadata struct that you
+     * got from the same GC instance.
+     * The return value indicates success or failure.
+     */
+    bool setArrayUsed(ArrayMetadata metadata);
 }

@@ -173,7 +173,7 @@ extern (C)
 
     size_t gc_extend( void* p, size_t mx, size_t sz, const scope TypeInfo ti = null ) nothrow
     {
-        return instance.extend( p, mx, sz,ti );
+        return instance.extend( p, mx, sz );
     }
 
     size_t gc_reserve( size_t sz ) nothrow

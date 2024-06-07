@@ -472,42 +472,46 @@ class ConservativeGC : GC
      * Throws:
      *  OutOfMemoryError on allocation failure
      */
-    void *malloc(size_t size, uint bits = 0, const TypeInfo ti = null) nothrow
+    void *malloc(size_t size, uint bits = 0, const void *context = null, immutable size_t *pointerBitmap = null) nothrow
     {
-        if (!size)
-        {
+        // bump any size alloctions.
+        immutable needed = adjustArguments(size, bits, context);
+
+        if (!needed) // size is 0, and no appending or finalizer requested.
             return null;
-        }
 
         size_t localAllocSize = void;
 
-        auto p = runLocked!(mallocNoSync, mallocTime, numMallocs)(size, bits, localAllocSize, ti);
+        auto p = runLocked!(mallocNoSync, mallocTime, numMallocs)(needed, bits, localAllocSize, pointerBitmap);
 
         invalidate(p[0 .. localAllocSize], 0xF0, true);
 
+        auto ret = setupMetadata(p[0 .. localAllocSize], bits, size, context);
+
         if (!(bits & BlkAttr.NO_SCAN))
         {
-            memset(p + size, 0, localAllocSize - size);
+            // zero out any bytes we didn't set that the caller isn't
+            // going to set.
+            memset(ret.ptr + size, 0, ret.length - size);
         }
-
-        return p;
+        return ret.ptr;
     }
 
 
     //
     // Implementation for malloc and calloc.
     //
-    private void *mallocNoSync(size_t size, uint bits, ref size_t alloc_size, const TypeInfo ti = null) nothrow
+    private void *mallocNoSync(size_t size, uint bits, ref size_t alloc_size, immutable size_t *pointerBitmap) nothrow
     {
         assert(size != 0);
 
         debug(PRINTF)
-            printf("GC::malloc(gcx = %p, size = %d bits = %x, ti = %s)\n", gcx, size, bits, debugTypeName(ti).ptr);
+            printf("GC::malloc(gcx = %p, size = %d bits = %x ptBmp = %p)\n", gcx, size, bits, pointerBitmap);
 
         assert(gcx);
         //debug(PRINTF) printf("gcx.self = %x, pthread_self() = %x\n", gcx.self, pthread_self());
 
-        auto p = gcx.alloc(size + SENTINEL_EXTRA, alloc_size, bits, ti);
+        auto p = gcx.alloc(size + SENTINEL_EXTRA, alloc_size, bits, pointerBitmap);
         if (!p)
             onOutOfMemoryError();
 
@@ -532,13 +536,20 @@ class ConservativeGC : GC
             return BlkInfo.init;
         }
 
+        auto context = (bits & BlkAttr.STRUCTFINAL) ? cast(void*)ti : null;
+        immutable needed = adjustArguments(size, bits, context);
+
         BlkInfo retval;
 
-        retval.base = runLocked!(mallocNoSync, mallocTime, numMallocs)(size, bits, retval.size, ti);
+        auto rtInfo = cast(immutable(size_t*))ti.rtInfo();
+
+        retval.base = runLocked!(mallocNoSync, mallocTime, numMallocs)(needed, bits, retval.size, rtInfo);
+
+        auto ret = setupMetadata(retval.base[0 .. retval.size], bits, size, context);
 
         if (!(bits & BlkAttr.NO_SCAN))
         {
-            memset(retval.base + size, 0, retval.size - size);
+            memset(ret.ptr + size, 0, ret.length - size);
         }
 
         retval.attr = bits;
@@ -561,27 +572,36 @@ class ConservativeGC : GC
      * Throws:
      *  OutOfMemoryError on allocation failure.
      */
-    void *calloc(size_t size, uint bits = 0, const TypeInfo ti = null) nothrow
+    void *calloc(size_t size, uint bits = 0, const void *context, immutable size_t *pointerBitmap) nothrow
     {
-        if (!size)
+        immutable needed = adjustArguments(size, bits, context);
+        if (!needed)
         {
             return null;
         }
 
         size_t localAllocSize = void;
 
-        auto p = runLocked!(mallocNoSync, mallocTime, numMallocs)(size, bits, localAllocSize, ti);
+        auto p = runLocked!(mallocNoSync, mallocTime, numMallocs)(needed, bits, localAllocSize, pointerBitmap);
 
-        debug (VALGRIND) makeMemUndefined(p[0..size]);
-        invalidate((p + size)[0 .. localAllocSize - size], 0xF0, true);
+        // set up array "used" space, and context pointer.
+        auto ret = setupMetadata(p[0 .. localAllocSize], bits, size, context);
 
-        memset(p, 0, size);
+        debug (VALGRIND) makeMemUndefined(ret);
+        invalidate((ret.ptr + size)[0 .. localAllocSize - size], 0xF0, true);
+
         if (!(bits & BlkAttr.NO_SCAN))
         {
-            memset(p + size, 0, localAllocSize - size);
+            // memset the whole thing
+            memset(ret.ptr, 0, ret.length);
+        }
+        else
+        {
+            // memset just the requested data
+            memset(ret.ptr, 0, size);
         }
 
-        return p;
+        return ret.ptr;
     }
 
     /**
@@ -594,7 +614,8 @@ class ConservativeGC : GC
      * Params:
      *  p = A pointer to the root of a valid memory block or to null.
      *  size = The desired allocation size in bytes.
-     *  bits = A bitmask of the attributes to set on this block.
+     *  bits = A bitmask of the attributes to set on this block. APPENDABLE
+     *         and FINALIZE are not allowed for realloc.
      *  ti = TypeInfo to describe the memory.
      *
      * Returns:
@@ -604,12 +625,18 @@ class ConservativeGC : GC
      * Throws:
      *  OutOfMemoryError on allocation failure.
      */
-    void *realloc(void *p, size_t size, uint bits = 0, const TypeInfo ti = null) nothrow
+    void *realloc(void *p, size_t size, uint bits = 0, immutable size_t *pointerBitmap = null) nothrow
     {
+
+        if(bits & (BlkAttr.APPENDABLE | BlkAttr.FINALIZE))
+            // these bits are not allowed. We can't properly manage
+            // reallocation of such blocks.
+            return null;
+
         size_t localAllocSize = void;
         auto oldp = p;
 
-        p = runLocked!(reallocNoSync, mallocTime, numMallocs)(p, size, bits, localAllocSize, ti);
+        p = runLocked!(reallocNoSync, mallocTime, numMallocs)(p, size, bits, localAllocSize, pointerBitmap);
 
         if (p && !(bits & BlkAttr.NO_SCAN))
         {
@@ -625,7 +652,7 @@ class ConservativeGC : GC
     //
     // bits will be set to the resulting bits of the new block
     //
-    private void *reallocNoSync(void *p, size_t size, ref uint bits, ref size_t alloc_size, const TypeInfo ti = null) nothrow
+    private void *reallocNoSync(void *p, size_t size, ref uint bits, ref size_t alloc_size, immutable size_t * pointerBitmap = null) nothrow
     {
         if (!size)
         {
@@ -635,7 +662,7 @@ class ConservativeGC : GC
             return null;
         }
         if (!p)
-            return mallocNoSync(size, bits, alloc_size, ti);
+            return mallocNoSync(size, bits, alloc_size, pointerBitmap);
 
         debug(PRINTF) printf("GC::realloc(p = %p, size = %llu)\n", p, cast(ulong)size);
 
@@ -661,9 +688,9 @@ class ConservativeGC : GC
         void* doMalloc()
         {
             if (!bits)
-                bits = pool.getBits(biti);
+                bits = pool.getBits(biti) & ~(BlkAttr.APPENDABLE | BlkAttr.FINALIZE | BlkAttr.STRUCTFINAL);
 
-            void* p2 = mallocNoSync(size, bits, alloc_size, ti);
+            void* p2 = mallocNoSync(size, bits, alloc_size, pointerBitmap);
             debug (SENTINEL)
                 psize = sentinel_size(q, psize);
             if (psize < size)
@@ -744,7 +771,7 @@ class ConservativeGC : GC
 
             alloc_size = psize;
             if (isPrecise)
-                pool.setPointerBitmapSmall(p, size, psize, bits, ti);
+                pool.setPointerBitmapSmall(p, size, psize, bits, pointerBitmap);
         }
 
         if (bits)
@@ -756,16 +783,16 @@ class ConservativeGC : GC
     }
 
 
-    size_t extend(void* p, size_t minsize, size_t maxsize, const TypeInfo ti) nothrow
+    size_t extend(void* p, size_t minsize, size_t maxsize) nothrow
     {
-        return runLocked!(extendNoSync, extendTime, numExtends)(p, minsize, maxsize, ti);
+        return runLocked!(extendNoSync, extendTime, numExtends)(p, minsize, maxsize);
     }
 
 
     //
     // Implementation of extend.
     //
-    private size_t extendNoSync(void* p, size_t minsize, size_t maxsize, const TypeInfo ti = null) nothrow
+    private size_t extendNoSync(void* p, size_t minsize, size_t maxsize) nothrow
     in
     {
         assert(minsize <= maxsize);
@@ -1376,15 +1403,69 @@ class ConservativeGC : GC
         stats.freeSize += freeListSize;
         stats.allocatedInCurrentThread = bytesAllocated;
     }
+
+    // get array information from a block
+    ArrayMetadata getArrayMetadata(void *ptr) {
+        // use the block info to determine all 
+        auto blkinfo = query(ptr);
+        if (blkinfo.attr & BlkAttr.APPENDABLE)
+        {
+            ArrayMetadata result;
+            immutable contextSize =
+                (blkinfo.attr & BlkAttr.STRUCTFINAL) ? (void *).sizeof : 0;
+
+            // get the actual length
+            if (blkinfo.size <= 256)
+            {
+                result.used = *cast(ubyte*)(blkinfo.base + blkinfo.size - contextSize - 1);
+                result._base = blkinfo.base;
+                result._flags = blkinfo.size - 1 - contextSize;
+            }
+            else if(blkinfo.size <= PAGESIZE / 2)
+            {
+                result.used = *cast(ushort*)(blkinfo.base + blkinfo.size - contextSize - 2);
+                result._base = blkinfo.base;
+                result._flags = blkinfo.size - 2 - contextSize;
+            }
+            else
+            {
+                // large block, it's always LARGEPREFIX bytes at the front.
+                result.used = *cast(size_t*)blkinfo.base;
+                result._base = blkinfo.base + LARGEPREFIX;
+                result._flags = blkinfo.size - LARGEPAD;
+            }
+            return result;
+        }
+        return ArrayMetadata.init;
+    }
+
+    bool setArrayUsed(ArrayMetadata metadata)
+    {
+        // Determine the length of the block
+        immutable sz = metadata.size();
+        if(metadata.used > sz)
+            // invalid size
+            return false;
+        if(metadata.size <= 256)
+        {
+            // small block
+            *cast(ubyte*)(metadata._base + sz) = cast(ubyte)metadata.used;
+        }
+        else if(metadata.size <= PAGESIZE / 2)
+        {
+            // medium block
+            *cast(ushort*)(metadata._base + sz) = cast(ushort)metadata.used;
+        }
+        else
+        {
+            *cast(size_t*)metadata._base = metadata.used;
+        }
+        return true;
+    }
 }
 
 
 /* ============================ Gcx =============================== */
-
-enum
-{   PAGESIZE =    4096,
-}
-
 
 enum Bins : ubyte
 {
@@ -1472,7 +1553,22 @@ private void set(ref PageBits bits, size_t i) @nogc pure nothrow
     bts(bits.ptr, i);
 }
 
-/* ============================ Gcx =============================== */
+enum PAGESIZE = 4096;
+
+// array runtime constants
+private
+{
+    enum : size_t
+    {
+        BIGLENGTHMASK = ~(PAGESIZE - 1),
+        SMALLPAD = 1,
+        MEDPAD = ushort.sizeof,
+        LARGEPREFIX = 16, // 16 bytes padding at the front of the array
+        LARGEPAD = LARGEPREFIX + 1,
+        MAXSMALLSIZE = 256-SMALLPAD,
+        MAXMEDSIZE = (PAGESIZE / 2) - MEDPAD
+    }
+}
 
 struct Gcx
 {
@@ -1893,13 +1989,13 @@ struct Gcx
         return isLowOnMem(cast(size_t)mappedPages * PAGESIZE);
     }
 
-    void* alloc(size_t size, ref size_t alloc_size, uint bits, const TypeInfo ti) nothrow
+    void* alloc(size_t size, ref size_t alloc_size, uint bits, immutable size_t *pointerBitmap) nothrow
     {
-        return size <= PAGESIZE/2 ? smallAlloc(size, alloc_size, bits, ti)
-                                  : bigAlloc(size, alloc_size, bits, ti);
+        return size <= PAGESIZE/2 ? smallAlloc(size, alloc_size, bits, pointerBitmap)
+                                  : bigAlloc(size, alloc_size, bits, pointerBitmap);
     }
 
-    void* smallAlloc(size_t size, ref size_t alloc_size, uint bits, const TypeInfo ti) nothrow
+    void* smallAlloc(size_t size, ref size_t alloc_size, uint bits, immutable size_t *pointerBitmap) nothrow
     {
         immutable bin = binTable[size];
         alloc_size = binsize[bin];
@@ -1968,9 +2064,9 @@ struct Gcx
         if (ConservativeGC.isPrecise)
         {
             debug(SENTINEL)
-                pool.setPointerBitmapSmall(sentinel_add(p), size - SENTINEL_EXTRA, size - SENTINEL_EXTRA, bits, ti);
+                pool.setPointerBitmapSmall(sentinel_add(p), size - SENTINEL_EXTRA, size - SENTINEL_EXTRA, bits, pointerBitmap);
             else
-                pool.setPointerBitmapSmall(p, size, alloc_size, bits, ti);
+                pool.setPointerBitmapSmall(p, size, alloc_size, bits, pointerBitmap);
         }
         return p;
     }
@@ -1979,7 +2075,7 @@ struct Gcx
      * Allocate a chunk of memory that is larger than a page.
      * Return null if out of memory.
      */
-    void* bigAlloc(size_t size, ref size_t alloc_size, uint bits, const TypeInfo ti = null) nothrow
+    void* bigAlloc(size_t size, ref size_t alloc_size, uint bits, immutable size_t * pointerBitmap) nothrow
     {
         debug(PRINTF) printf("In bigAlloc.  Size:  %d\n", size);
 
@@ -2055,15 +2151,7 @@ struct Gcx
 
         if (ConservativeGC.isPrecise)
         {
-            // an array of classes is in fact an array of pointers
-            immutable(void)* rtinfo;
-            if (!ti)
-                rtinfo = rtinfoHasPointers;
-            else if ((bits & BlkAttr.APPENDABLE) && (typeid(ti) is typeid(TypeInfo_Class)))
-                rtinfo = rtinfoHasPointers;
-            else
-                rtinfo = ti.rtInfo();
-            pool.rtinfo[pn] = cast(immutable(size_t)*)rtinfo;
+            pool.rtinfo[pn] = pointerBitmap;
         }
 
         return p;
@@ -3943,32 +4031,29 @@ struct Pool
         }
     }
 
-    void setPointerBitmapSmall(void* p, size_t s, size_t allocSize, uint attr, const TypeInfo ti) nothrow
+    void setPointerBitmapSmall(void* p, size_t s, size_t allocSize, uint attr, immutable size_t *pointerBitmap) nothrow
     {
         if (!(attr & BlkAttr.NO_SCAN))
-            setPointerBitmap(p, s, allocSize, ti, attr);
+            setPointerBitmap(p, s, allocSize, pointerBitmap, attr);
     }
 
     pragma(inline,false)
-    void setPointerBitmap(void* p, size_t s, size_t allocSize, const TypeInfo ti, uint attr) nothrow
+    void setPointerBitmap(void* p, size_t s, size_t allocSize, const size_t * pointerBitmap, uint attr) nothrow
     {
         size_t offset = p - baseAddr;
         //debug(PRINTF) printGCBits(&pool.is_pointer);
 
         debug(PRINTF)
-            printf("Setting a pointer bitmap for %s at %p + %llu\n", debugTypeName(ti).ptr, p, cast(ulong)s);
+            printf("Setting a pointer bitmap using %p at %p + %llu\n", pointerBitmap, p, cast(ulong)s);
 
-        if (ti)
+        if (pointerBitmap)
         {
             if (attr & BlkAttr.APPENDABLE)
             {
-                // an array of classes is in fact an array of pointers
-                if (typeid(ti) is typeid(TypeInfo_Class))
-                    goto L_conservative;
                 s = allocSize;
             }
 
-            auto rtInfo = cast(const(size_t)*)ti.rtInfo();
+            const(size_t)* rtInfo = pointerBitmap;
 
             if (rtInfo is rtinfoNoPointers)
             {
@@ -3998,8 +4083,8 @@ struct Pool
                     is_pointer.copyRange(offset/(void*).sizeof, tocopy, bitmap);
                 }
 
-                debug(PRINTF) printf("\tSetting bitmap for new object (%s)\n\t\tat %p\t\tcopying from %p + %llu: ",
-                                     debugTypeName(ti).ptr, p, bitmap, cast(ulong)element_size);
+                debug(PRINTF) printf("\tSetting bitmap for new object (%p)\n\t\tat %p\t\tcopying from %p + %llu: ",
+                                     pointerBitmap, p, bitmap, cast(ulong)element_size);
                 debug(PRINTF)
                     for (size_t i = 0; i < element_size/((void*).sizeof); i++)
                         printf("%d", (bitmap[i/(8*size_t.sizeof)] >> (i%(8*size_t.sizeof))) & 1);
@@ -4025,7 +4110,7 @@ struct Pool
             // without notifying the GC
             s = allocSize;
 
-            debug(PRINTF) printf("Allocating a block without TypeInfo\n");
+            debug(PRINTF) printf("Allocating a block without pointer bitmap\n");
             is_pointer.setRange(offset/(void*).sizeof, s/(void*).sizeof);
         }
         //debug(PRINTF) printGCBits(&pool.is_pointer);
@@ -5117,4 +5202,84 @@ void undefinedWrite(T)(ref T var, T value) nothrow
     }
     else
         var = value;
+}
+
+private size_t adjustArguments(const size_t size, ref uint bits, const void *context) nothrow
+{
+    immutable contextSize = context ? context.sizeof : 0;
+    auto needed = size;
+    if((bits & BlkAttr.FINALIZE) && context !is null)
+    {
+        bits |= BlkAttr.STRUCTFINAL;
+    }
+    else
+    {
+        // the "STRUCTFINAL" bit basically just indicates there is a
+        // context pointer in the block now.
+        bits &= ~BlkAttr.STRUCTFINAL;
+    }
+
+    if(bits & BlkAttr.APPENDABLE)
+    {
+        return needed + (needed + contextSize > MAXMEDSIZE ? LARGEPAD : (needed > MAXSMALLSIZE ? MEDPAD : SMALLPAD) + contextSize);
+    }
+    else
+    {
+        return needed + contextSize;
+    }
+}
+
+// sets up the array/context pointer metadata based on the block allocated.
+// This is called on any block *creation*, and not on updating the array
+// metadata.
+//
+// The return value is the true data that the user requested.
+//
+// Note that unlike the previous version of the GC, the context pointer is
+// stored at the front of large blocks *always*. This makes things easy to
+// deal with. In the previous version, the context pointer was stored at
+// the end if not appendable.
+private void[] setupMetadata(void[] block, uint bits, size_t used, const void *context) nothrow
+{
+    if (block.length > MAXMEDSIZE)
+    {
+        // if we are storing context or used size, we always use up 2
+        // size_t at the start of the block.
+        if(bits & (BlkAttr.APPENDABLE | BlkAttr.FINALIZE))
+        {
+            auto mptr = cast(size_t *)block.ptr;
+            mptr[0] = used;
+            mptr[1] = cast(size_t)context;
+            // skip the header
+            return block[LARGEPREFIX .. $];
+        }
+        return block;
+    }
+    else
+    {
+        // context pointer is always stored at the end.
+        auto pend = block.ptr + block.length;
+        if((bits & BlkAttr.FINALIZE) && context !is null)
+        {
+            pend -= (void*).sizeof;
+            *cast(const(void) **)pend = context;
+        }
+
+        // array size is stored at the end (allowing for the context
+        // pointer).
+        if (bits & BlkAttr.APPENDABLE)
+        {
+            if (block.length > MAXSMALLSIZE)
+            {
+                pend -= ushort.sizeof;
+                *cast(ushort*)pend = cast(ushort)used;
+            }
+            else
+            {
+                pend -= ubyte.sizeof;
+                *cast(ubyte*)pend = cast(ubyte)used;
+            }
+        }
+        return block[0 .. pend - block.ptr];
+    }
 }
