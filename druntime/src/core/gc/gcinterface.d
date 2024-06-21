@@ -80,10 +80,14 @@ struct ArrayMetadata
     // allow checking if the array metadata is valid
     bool opCast(T : bool)() const => _base !is null;
 
+    // this is for the GC to use.
+    size_t _gc_private_flags() => _gcFlags;
+
     private
     {
         void *_base;
         size_t _size;
+        size_t _gcFlags; // set by the GC for its own purposes if desired
     }
 }
 
@@ -144,7 +148,7 @@ interface GC
      * Newer version of malloc that decouples from TypeInfo. Note that
      * STRUCTFINAL is ignored in the bits.
      */
-    void *malloc(size_t size, uint bits, const void *finalizer, immutable size_t *pointerbitmap) nothrow;
+    void *malloc(size_t size, uint bits, const void *context, immutable size_t *pointerbitmap) nothrow;
 
     /*
      *
@@ -287,10 +291,10 @@ interface GC
      * Get array metadata for a specific pointer. Note that the resulting
      * metadata will point at the block start, not the pointer.
      */
-    ArrayMetadata getArrayMetadata(void *) @nogc nothrow @safe;
+    ArrayMetadata getArrayMetadata(void *ptr) @nogc nothrow @safe;
 
     /**
-     * Set the array used data size. You must use a metadata struct that you
+     * Set the arraBuild SDC binding to new array runtimey used data size. You must use a metadata struct that you
      * got from the same GC instance. If existingUsed is ~0, then this
      * overrides any used value already stored. If it's any other value, the
      * call only succeeds if the existing used value matches.

@@ -12,13 +12,17 @@ extern(C) nothrow {
         void onOutOfMemoryError(void* pretend_sideffect = null, string file = __FILE__, size_t line = __LINE__) @trusted nothrow @nogc;
 
         // hooks from sdc
-        void __sd_gc_druntime_qalloc(BlkInfo *result, size_t size, uint bits, void *finalizer);
+        void __sd_gc_druntime_qalloc(BlkInfo *result, size_t size, uint bits, const(void)*finalizer);
         //BlkInfo __sd_gc_druntime_qalloc(size_t size, uint bits, void *finalizer);
         void __sd_gc_init();
         void __sd_gc_collect();
         void *__sd_gc_realloc(void *ptr, size_t size);
         @nogc void *__sd_gc_free(void *ptr);
         @nogc BlkInfo __sd_gc_druntime_allocInfo(void *ptr);
+        size_t __sd_getArrayUsed(void *ptr, size_t pdData, bool atomic) @nogc;
+        bool __sd_setArrayUsed(void *ptr, size_t pdData, size_t newUsed, size_t existingUsed, bool atomic) @nogc;
+        void __sd_getArrayMetadata(void *ptr, void** base, size_t* size, size_t* flags) @nogc;
+
         void rt_finalize2(void* p, bool det, bool resetMemory) nothrow;
 }
 
@@ -178,12 +182,12 @@ final class SnazzyGC : GC
     /**
      *
      */
-    void* malloc(size_t size, uint bits, const TypeInfo ti) nothrow
+    void *malloc(size_t size, uint bits, const void *context, immutable size_t *pointerbitmap) nothrow
     {
         if(!size)
             return null;
-        // TODO: deal with finalizer/typeinfo
-        BlkInfo blkinfo = qalloc(size, bits, ti);
+        BlkInfo blkinfo;
+        __sd_gc_druntime_qalloc(&blkinfo, size, bits, context);
         return blkinfo.base;
     }
 
@@ -216,19 +220,15 @@ final class SnazzyGC : GC
     /*
      *
      */
-    void* calloc(size_t size, uint bits, const TypeInfo ti) nothrow
+    void* calloc(size_t size, uint bits, const void* context, immutable size_t* pointerBitmap) nothrow
     {
         if(!size)
             return null;
         //auto blkinfo = __sd_gc_druntime_qalloc(size, bits, null);
         BlkInfo blkinfo;
 
-        void *ctx = null;
-        if (bits & BlkAttr.FINALIZE)
-            ctx = (bits & BlkAttr.STRUCTFINAL) ? cast(void*)ti : TYPEINFO_IN_BLOCK;
-
         // TODO: need to hook SDC's zero alloc function
-        __sd_gc_druntime_qalloc(&blkinfo, size, bits, cast(void *)ti);
+        __sd_gc_druntime_qalloc(&blkinfo, size, bits, context);
         if(blkinfo.base)
         {
             if(!(bits & BlkAttr.NO_SCAN))
@@ -248,7 +248,7 @@ final class SnazzyGC : GC
     /*
      *
      */
-    void* realloc(void* p, size_t size, uint bits, const TypeInfo ti) nothrow
+    void* realloc(void* p, size_t size, uint bits, immutable size_t *ptrBitmap) nothrow
     {
         // TODO: deal with bits and typeinfo
         return __sd_gc_realloc(p, size);
@@ -263,7 +263,7 @@ final class SnazzyGC : GC
      *  0 if could not extend p,
      *  total size of entire memory block if successful.
      */
-    size_t extend(void* p, size_t minsize, size_t maxsize, const TypeInfo ti) nothrow
+    size_t extend(void* p, size_t minsize, size_t maxsize) nothrow
     {
         // TODO: add once there is a hook
         return 0;
@@ -413,5 +413,42 @@ final class SnazzyGC : GC
     {
         // TODO: add once there is a hook
         return 0;
+    }
+
+    /**
+     * Get array metadata for a specific pointer. Note that the resulting
+     * metadata will point at the block start, not the pointer.
+     */
+    ArrayMetadata getArrayMetadata(void *ptr) @nogc nothrow @trusted
+    {
+        void *base;
+        size_t size;
+        size_t flags;
+        __sd_getArrayMetadata(ptr, &base, &size, &flags);
+        return ArrayMetadata(base, size, flags);
+    }
+
+    /**
+     * Set the array used data size. You must use a metadata struct that you
+     * got from the same GC instance. If existingUsed is ~0, then this
+     * overrides any used value already stored. If it's any other value, the
+     * call only succeeds if the existing used value matches.
+     *
+     * The return value indicates success or failure.
+     * Generally called via the ArrayMetadata method.
+     */
+    bool setArrayUsed(ref ArrayMetadata metadata, size_t newUsed, size_t existingUsed = ~0UL, bool atomic = false) nothrow @nogc @trusted
+    {
+        return __sd_setArrayUsed(metadata.base, metadata._gc_private_flags, newUsed, existingUsed, atomic) ? true : false;
+    }
+
+    /**
+     * get the array used data size. You must use a metadata struct that you
+     * got from the same GC instance.
+     * Generally called via the ArrayMetadata method.
+     */
+    size_t getArrayUsed(ref ArrayMetadata metadata, bool atomic = false) nothrow @nogc @trusted
+    {
+        return __sd_getArrayUsed(metadata.base, metadata._gc_private_flags, atomic);
     }
 }
