@@ -285,4 +285,19 @@ extern (C)
             proxiedGC = null;
         }
     }
+
+    ArrayMetadata gc_getArrayMetadata(void *ptr) nothrow @nogc @trusted
+    {
+        return instance.getArrayMetadata(ptr);
+    }
+
+    size_t gc_getArrayMetadataUsed(ref ArrayMetadata meta, bool atomic) nothrow @nogc @trusted
+    {
+        return instance.getArrayUsed(meta, atomic);
+    }
+
+    size_t gc_setArrayMetadataUsed(ref ArrayMetadata meta, size_t used, size_t existingUsed, bool atomic) nothrow @nogc @trusted
+    {
+        return instance.setArrayUsed(meta, used, existingUsed, atomic);
+    }
 }

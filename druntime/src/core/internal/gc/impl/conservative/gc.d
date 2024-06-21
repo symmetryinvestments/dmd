@@ -89,8 +89,8 @@ private
     {
         // to allow compilation of this module without access to the rt package,
         //  make these functions available from rt.lifetime
-        void rt_finalizeFromGC(void* p, size_t size, uint attr) nothrow;
-        int rt_hasFinalizerInSegment(void* p, size_t size, uint attr, const scope void[] segment) nothrow;
+        void rt_finalizeFromGC(void* p, size_t size, uint attr, void *context) nothrow;
+        int rt_hasFinalizerInSegment(void* p, size_t size, void *context, const scope void[] segment) nothrow;
 
         // Declared as an extern instead of importing core.exception
         // to avoid inlining - see https://issues.dlang.org/show_bug.cgi?id=13725.
@@ -530,18 +530,17 @@ class ConservativeGC : GC
 
     BlkInfo qalloc( size_t size, uint bits, const scope TypeInfo ti) nothrow
     {
+        auto context = (bits & BlkAttr.STRUCTFINAL) ? cast(void*)ti : null;
+        immutable needed = adjustArguments(size, bits, context);
 
-        if (!size)
+        if (!needed)
         {
             return BlkInfo.init;
         }
 
-        auto context = (bits & BlkAttr.STRUCTFINAL) ? cast(void*)ti : null;
-        immutable needed = adjustArguments(size, bits, context);
-
         BlkInfo retval;
 
-        auto rtInfo = cast(immutable(size_t*))ti.rtInfo();
+        auto rtInfo = cast(immutable(size_t*))(ti is null ? rtinfoHasPointers : ti.rtInfo());
 
         retval.base = runLocked!(mallocNoSync, mallocTime, numMallocs)(needed, bits, retval.size, rtInfo);
 
@@ -1070,7 +1069,7 @@ class ConservativeGC : GC
      *  Information regarding the memory block referenced by p or BlkInfo.init
      *  on error.
      */
-    BlkInfo query(void *p) nothrow
+    BlkInfo query(void *p) nothrow @nogc
     {
         if (!p)
         {
@@ -1084,7 +1083,7 @@ class ConservativeGC : GC
     //
     // Implementation of query
     //
-    BlkInfo queryNoSync(void *p) nothrow
+    BlkInfo queryNoSync(void *p) nothrow @nogc
     {
         assert(p);
 
@@ -1405,62 +1404,94 @@ class ConservativeGC : GC
     }
 
     // get array information from a block
-    ArrayMetadata getArrayMetadata(void *ptr) {
+    ArrayMetadata getArrayMetadata(void *ptr) nothrow @trusted @nogc {
         // use the block info to determine all 
         auto blkinfo = query(ptr);
         if (blkinfo.attr & BlkAttr.APPENDABLE)
         {
-            ArrayMetadata result;
+            void *base = void;
+            size_t size = void;
             immutable contextSize =
                 (blkinfo.attr & BlkAttr.STRUCTFINAL) ? (void *).sizeof : 0;
 
             // get the actual length
             if (blkinfo.size <= 256)
             {
-                result.used = *cast(ubyte*)(blkinfo.base + blkinfo.size - contextSize - 1);
-                result._base = blkinfo.base;
-                result._flags = blkinfo.size - 1 - contextSize;
+                base = blkinfo.base;
+                size = blkinfo.size - SMALLPAD - contextSize;
             }
             else if(blkinfo.size <= PAGESIZE / 2)
             {
-                result.used = *cast(ushort*)(blkinfo.base + blkinfo.size - contextSize - 2);
-                result._base = blkinfo.base;
-                result._flags = blkinfo.size - 2 - contextSize;
+                base = blkinfo.base;
+                size = blkinfo.size - MEDPAD - contextSize;
             }
             else
             {
                 // large block, it's always LARGEPREFIX bytes at the front.
-                result.used = *cast(size_t*)blkinfo.base;
-                result._base = blkinfo.base + LARGEPREFIX;
-                result._flags = blkinfo.size - LARGEPAD;
+                base = blkinfo.base + LARGEPREFIX;
+                size = blkinfo.size - LARGEPAD;
             }
-            return result;
+            return ArrayMetadata(base, size);
         }
         return ArrayMetadata.init;
     }
 
-    bool setArrayUsed(ArrayMetadata metadata)
+    size_t getArrayUsed(ref ArrayMetadata metadata, bool atomic) nothrow @nogc @trusted
     {
+        if(metadata.base is null)
+            // sanity check
+            return 0;
+
+        // Use the fact that we set the size up to end on the array length field.
+        if (metadata.size <= 256)
+            return *cast(ubyte*)(metadata.base + metadata.size);
+        else if(metadata.size <= PAGESIZE / 2)
+            return *cast(ushort*)(metadata.base + metadata.size);
+        else
+            // large block, it's the 2 words before the metadata pointer.
+            return *(cast(size_t*)metadata.base - 2);
+    }
+
+    bool setArrayUsed(ref ArrayMetadata metadata, size_t used, size_t existingUsed, bool atomic) nothrow @nogc @trusted
+    {
+        if(metadata.base is null)
+            // sanity check
+            return false;
         // Determine the length of the block
         immutable sz = metadata.size();
-        if(metadata.used > sz)
+        if(used > sz)
             // invalid size
             return false;
-        if(metadata.size <= 256)
+        if(sz < 256)
         {
             // small block
-            *cast(ubyte*)(metadata._base + sz) = cast(ubyte)metadata.used;
+            auto lenptr = cast(ubyte *)(metadata.base + sz);
+            if(existingUsed == -1 || *lenptr == existingUsed)
+            {
+                *lenptr = cast(ubyte)used;
+                return true;
+            }
         }
-        else if(metadata.size <= PAGESIZE / 2)
+        else if(sz < PAGESIZE / 2)
         {
             // medium block
-            *cast(ushort*)(metadata._base + sz) = cast(ushort)metadata.used;
+            auto lenptr = cast(ushort *)(metadata.base + sz);
+            if(existingUsed == -1 || *lenptr == existingUsed)
+            {
+                *lenptr = cast(ushort)used;
+                return true;
+            }
         }
         else
         {
-            *cast(size_t*)metadata._base = metadata.used;
+            auto lenptr = cast(size_t*)metadata.base - 2;
+            if(existingUsed == -1 || *lenptr == existingUsed)
+            {
+                *lenptr = used;
+                return true;
+            }
         }
-        return true;
+        return false;
     }
 }
 
@@ -1561,7 +1592,7 @@ private
     enum : size_t
     {
         BIGLENGTHMASK = ~(PAGESIZE - 1),
-        SMALLPAD = 1,
+        SMALLPAD = ubyte.sizeof,
         MEDPAD = ushort.sizeof,
         LARGEPREFIX = 16, // 16 bytes padding at the front of the array
         LARGEPAD = LARGEPREFIX + 1,
@@ -1898,7 +1929,7 @@ struct Gcx
     /**
      *
      */
-    BlkInfo getInfo(void* p) nothrow
+    BlkInfo getInfo(void* p) nothrow @nogc
     {
         Pool* pool = findPool(p);
         if (pool)
@@ -2709,7 +2740,10 @@ struct Gcx
                         {
                             size_t size = npages * PAGESIZE - SENTINEL_EXTRA;
                             uint attr = pool.getBits(biti);
-                            rt_finalizeFromGC(q, sentinel_size(q, size), attr);
+                            auto ssize = sentinel_size(q, size);
+                            auto context = extractContextPointer(q, ssize, attr);
+                            trimToArrayExtents(q, ssize, attr);
+                            rt_finalizeFromGC(q, ssize, attr, context);
                         }
 
                         pool.clrBits(biti, ~BlkAttr.NONE ^ BlkAttr.FINALIZE);
@@ -2830,7 +2864,13 @@ struct Gcx
                                     sentinel_Invariant(q);
 
                                     if (pool.finals.nbits && pool.finals.test(biti))
-                                        rt_finalizeFromGC(q, sentinel_size(q, size), pool.getBits(biti));
+                                    {
+                                        auto attr = pool.getBits(biti);
+                                        auto ssize = sentinel_size(q, size);
+                                        auto context = extractContextPointer(q, ssize, attr);
+                                        trimToArrayExtents(q, ssize, attr);
+                                        rt_finalizeFromGC(q, ssize, attr, context);
+                                    }
 
                                     assert(core.bitop.bt(toFree.ptr, i));
 
@@ -2869,11 +2909,11 @@ struct Gcx
         assert(freedLargePages <= usedLargePages);
         usedLargePages -= freedLargePages;
         debug(COLLECT_PRINTF) printf("\tfree'd %u bytes, %u pages from %u pools\n",
-                                     freed, freedLargePages, this.pooltable.length);
+                                     cast(uint)freed, cast(uint)freedLargePages, cast(uint)this.pooltable.length);
 
         assert(freedSmallPages <= usedSmallPages);
         usedSmallPages -= freedSmallPages;
-        debug(COLLECT_PRINTF) printf("\trecovered small pages = %d\n", freedSmallPages);
+        debug(COLLECT_PRINTF) printf("\trecovered small pages = %d\n", cast(int)freedSmallPages);
 
         return freedLargePages + freedSmallPages;
     }
@@ -3778,7 +3818,7 @@ struct Pool
     /**
     *
     */
-    uint getBits(size_t biti) nothrow
+    uint getBits(size_t biti) nothrow @nogc
     {
         uint bits;
 
@@ -4000,7 +4040,7 @@ struct Pool
             return (cast(SmallObjectPool*)&this).getSize(p);
     }
 
-    BlkInfo slGetInfo(void* p) nothrow
+    BlkInfo slGetInfo(void* p) nothrow @nogc
     {
         if (isLargeObject)
             return (cast(LargeObjectPool*)&this).getInfo(p);
@@ -4293,7 +4333,7 @@ struct LargeObjectPool
     /**
     *
     */
-    BlkInfo getInfo(void* p) nothrow
+    BlkInfo getInfo(void* p) nothrow @nogc
     {
         BlkInfo info;
 
@@ -4328,10 +4368,12 @@ struct LargeObjectPool
             size_t size = sentinel_size(p, getSize(pn));
             uint attr = getBits(biti);
 
-            if (!rt_hasFinalizerInSegment(p, size, attr, segment))
+            auto context = extractContextPointer(p, size, attr);
+            if (!rt_hasFinalizerInSegment(p, size, context, segment))
                 continue;
 
-            rt_finalizeFromGC(p, size, attr);
+            trimToArrayExtents(p, size, attr);
+            rt_finalizeFromGC(p, size, attr, context);
 
             clrBits(biti, ~BlkAttr.NONE);
 
@@ -4403,7 +4445,7 @@ struct SmallObjectPool
         return binsize[bin];
     }
 
-    BlkInfo getInfo(void* p) nothrow
+    BlkInfo getInfo(void* p) nothrow @nogc
     {
         BlkInfo info;
         size_t offset = cast(size_t)(p - baseAddr);
@@ -4452,11 +4494,13 @@ struct SmallObjectPool
 
                 auto q = sentinel_add(p);
                 uint attr = getBits(biti);
-                const ssize = sentinel_size(q, size);
-                if (!rt_hasFinalizerInSegment(q, ssize, attr, segment))
+                auto ssize = sentinel_size(q, size);
+                auto context = extractContextPointer(q, ssize, attr);
+                if (!rt_hasFinalizerInSegment(q, ssize, context, segment))
                     continue;
 
-                rt_finalizeFromGC(q, ssize, attr);
+                trimToArrayExtents(q, ssize, attr);
+                rt_finalizeFromGC(q, ssize, attr, context);
 
                 freeBits = true;
                 toFree.set(i);
@@ -5206,8 +5250,7 @@ void undefinedWrite(T)(ref T var, T value) nothrow
 
 private size_t adjustArguments(const size_t size, ref uint bits, const void *context) nothrow
 {
-    immutable contextSize = context ? context.sizeof : 0;
-    auto needed = size;
+    immutable contextSize = context ? (void*).sizeof : 0;
     if((bits & BlkAttr.FINALIZE) && context !is null)
     {
         bits |= BlkAttr.STRUCTFINAL;
@@ -5219,39 +5262,61 @@ private size_t adjustArguments(const size_t size, ref uint bits, const void *con
         bits &= ~BlkAttr.STRUCTFINAL;
     }
 
+    size_t padding = void;
     if(bits & BlkAttr.APPENDABLE)
     {
-        return needed + (needed + contextSize > MAXMEDSIZE ? LARGEPAD : (needed > MAXSMALLSIZE ? MEDPAD : SMALLPAD) + contextSize);
+        if (size > MAXMEDSIZE - contextSize)
+            padding = LARGEPAD;
+        else if(size > MAXSMALLSIZE - contextSize)
+            padding = MEDPAD + contextSize;
+        else
+            padding = SMALLPAD + contextSize;
     }
     else
     {
-        return needed + contextSize;
+        padding = contextSize;
     }
+
+
+    if (padding)
+    {
+        import core.checkedint;
+        bool overflow;
+        auto paddedSize = addu(size, padding, overflow);
+
+        if (overflow)
+            return 0;
+
+        return paddedSize;
+    }
+
+    return size;
 }
 
 // sets up the array/context pointer metadata based on the block allocated.
 // This is called on any block *creation*, and not on updating the array
 // metadata.
 //
-// The return value is the true data that the user requested.
+// The return value is the true data that the user can use.
 //
 // Note that unlike the previous version of the GC, the context pointer is
 // stored at the front of large blocks *always*. This makes things easy to
 // deal with. In the previous version, the context pointer was stored at
-// the end if not appendable.
+// the end if not appendable. The end result is one less pointer-sized chunk that is usable.
 private void[] setupMetadata(void[] block, uint bits, size_t used, const void *context) nothrow
 {
     if (block.length > MAXMEDSIZE)
     {
         // if we are storing context or used size, we always use up 2
         // size_t at the start of the block.
-        if(bits & (BlkAttr.APPENDABLE | BlkAttr.FINALIZE))
+        if(bits & (BlkAttr.APPENDABLE | BlkAttr.STRUCTFINAL))
         {
             auto mptr = cast(size_t *)block.ptr;
             mptr[0] = used;
             mptr[1] = cast(size_t)context;
-            // skip the header
-            return block[LARGEPREFIX .. $];
+            // skip the header, leave the padding
+            auto padbyte = (bits & BlkAttr.APPENDABLE) ? 1 : 0;
+            return block.ptr[LARGEPREFIX .. block.length - padbyte];
         }
         return block;
     }
@@ -5259,7 +5324,7 @@ private void[] setupMetadata(void[] block, uint bits, size_t used, const void *c
     {
         // context pointer is always stored at the end.
         auto pend = block.ptr + block.length;
-        if((bits & BlkAttr.FINALIZE) && context !is null)
+        if (bits & BlkAttr.STRUCTFINAL)
         {
             pend -= (void*).sizeof;
             *cast(const(void) **)pend = context;
@@ -5280,6 +5345,44 @@ private void[] setupMetadata(void[] block, uint bits, size_t used, const void *c
                 *cast(ubyte*)pend = cast(ubyte)used;
             }
         }
-        return block[0 .. pend - block.ptr];
+        return block.ptr[0 .. pend - block.ptr];
+    }
+}
+
+// the context pointer is stored at the end of the block for items less than
+// page-sized, and in the second word on page or larger sizes.
+private void *extractContextPointer(void* ptr, size_t size, uint attr) @nogc nothrow pure
+{
+    if (attr & BlkAttr.STRUCTFINAL)
+    {
+        if (size <= PAGESIZE / 2)
+            return *(cast(void**)(ptr + size) - 1);
+        else
+            return *(cast(void**)ptr + 1);
+    }
+    // no finalizer stored in the block by the GC
+    return null;
+}
+
+private void trimToArrayExtents(ref void *ptr, ref size_t blockSize, uint attr) nothrow pure @nogc
+{
+    if (attr & BlkAttr.APPENDABLE)
+    {
+        void *pend = ptr + blockSize;
+        if (attr & BlkAttr.STRUCTFINAL)
+            // skip the finalizer
+            pend -= (void*).sizeof;
+
+        // get the actual length
+        if (blockSize <= 256)
+            blockSize = *(cast(ubyte*)pend - 1);
+        else if(blockSize <= PAGESIZE / 2)
+            blockSize = *(cast(ushort*)pend - 1);
+        else
+        {
+            // large block, it's always LARGEPREFIX bytes at the front.
+            blockSize = *(cast(size_t*)ptr);
+            ptr += 2 * size_t.sizeof;
+        }
     }
 }

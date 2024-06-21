@@ -50,24 +50,40 @@ private void setupContextAndBitmap(uint bits, const TypeInfo ti, ref const(void)
     }
 }
 
-// Array metadata is used to manage the array information of a block.
+// private array management functions. These forward to the GC
+private extern(C) size_t gc_getArrayMetadataUsed(ref ArrayMetadata amd, bool atomic) pure @safe @nogc nothrow;
+private extern(C) bool gc_setArrayMetadataUsed(ref ArrayMetadata amd, size_t used, size_t existingUsed, bool atomic) pure @safe @nogc nothrow;
+
+// Array metadata is used to manage the array information of a block. Note that
+// the base and flags cannot be set by users, only the used size.
 struct ArrayMetadata
 {
-    size_t used;
-    const(void)* base() { return _base; }
-    size_t size() const pure @safe @nogc nothrow {
-        static if(size_t.sizeof == 8)
-
-            // 48 bits for length
-            return _flags & 0x0000_ffff_ffff_ffff;
-        else
-            // 31 bits for length
-            return _flags & 0x7fff_ffff;
+    pure @safe @nogc nothrow:
+    inout(void*) base() inout => _base;
+    size_t size() const => _size;
+    size_t getUsed(bool atomic = false) pure @safe @nogc nothrow
+    {
+        return gc_getArrayMetadataUsed(this, atomic);
     }
 
-    package(core) {
+    bool setUsed(size_t used, size_t existingUsed = ~0UL, bool atomic = false) pure @safe @nogc nothrow
+    {
+        return gc_setArrayMetadataUsed(this, used, existingUsed, atomic);
+    }
+
+    // check if a pointer points at the allocated array space
+    bool contains(void *ptr) const @trusted
+    {
+        return ptr >= _base && ptr < _base + size;
+    }
+
+    // allow checking if the array metadata is valid
+    bool opCast(T : bool)() const => _base !is null;
+
+    private
+    {
         void *_base;
-        size_t _flags;
+        size_t _size;
     }
 }
 
@@ -206,7 +222,7 @@ interface GC
      * Determine the base address of the block containing p.  If p is not a gc
      * allocated pointer, return null.
      */
-    BlkInfo query(void* p) nothrow;
+    BlkInfo query(void* p) nothrow @nogc;
 
     /**
      * Retrieve statistics about garbage collection.
@@ -271,12 +287,23 @@ interface GC
      * Get array metadata for a specific pointer. Note that the resulting
      * metadata will point at the block start, not the pointer.
      */
-    ArrayMetadata getArrayMetadata(void *);
+    ArrayMetadata getArrayMetadata(void *) @nogc nothrow @safe;
 
     /**
      * Set the array used data size. You must use a metadata struct that you
-     * got from the same GC instance.
+     * got from the same GC instance. If existingUsed is ~0, then this
+     * overrides any used value already stored. If it's any other value, the
+     * call only succeeds if the existing used value matches.
+     *
      * The return value indicates success or failure.
+     * Generally called via the ArrayMetadata method.
      */
-    bool setArrayUsed(ArrayMetadata metadata);
+    bool setArrayUsed(ref ArrayMetadata metadata, size_t newUsed, size_t existingUsed = ~0UL, bool atomic = false) nothrow @nogc @safe;
+
+    /**
+     * get the array used data size. You must use a metadata struct that you
+     * got from the same GC instance.
+     * Generally called via the ArrayMetadata method.
+     */
+    size_t getArrayUsed(ref ArrayMetadata metadata, bool atomic = false) nothrow @nogc @safe;
 }

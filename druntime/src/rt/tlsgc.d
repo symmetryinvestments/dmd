@@ -23,7 +23,7 @@ static import rt.lifetime, rt.sections;
 struct Data
 {
     typeof(rt.sections.initTLSRanges()) tlsRanges;
-    rt.lifetime.BlkInfo** blockInfoCache;
+    rt.lifetime.ArrayMetadata** arrayMetadataCache;
 }
 
 /**
@@ -39,7 +39,7 @@ void* init() nothrow @nogc
 
     // do module specific initialization
     data.tlsRanges = rt.sections.initTLSRanges();
-    data.blockInfoCache = &rt.lifetime.__blkcache_storage;
+    data.arrayMetadataCache = &rt.lifetime.__arrayMeta_storage;
 
     return data;
 }
@@ -78,5 +78,5 @@ alias int delegate(void* addr) nothrow IsMarkedDg;
 void processGCMarks(void* data, scope IsMarkedDg dg) nothrow
 {
     // do module specific sweeping
-    rt.lifetime.processGCMarks(*(cast(Data*)data).blockInfoCache, dg);
+    rt.lifetime.processGCMarks(*(cast(Data*)data).arrayMetadataCache, dg);
 }

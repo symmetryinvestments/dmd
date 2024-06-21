@@ -273,8 +273,13 @@ class ManualGC : GC
         return ArrayMetadata.init;
     }
 
-    bool setArrayUsed(ArrayMetadata metadata)
+    bool setArrayUsed(ref ArrayMetadata metadata, size_t newUsed, size_t existingUsed = ~0UL, bool atomic = false)
     {
         return false;
+    }
+
+    size_t getArrayUsed(ref ArrayMetadata metadata, bool atomic = false)
+    {
+        return 0;
     }
 }

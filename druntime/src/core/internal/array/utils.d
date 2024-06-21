@@ -11,11 +11,15 @@ module core.internal.array.utils;
 
 import core.internal.traits : Parameters;
 import core.memory : GC;
+import core.gc.gcinterface : ArrayMetadata;
 
-alias BlkInfo = GC.BlkInfo;
+//alias BlkInfo = GC.BlkInfo;
 alias BlkAttr = GC.BlkAttr;
 
-private
+// fake pure
+extern(C) ArrayMetadata gc_getArrayMetadata(void *ptr) nothrow @nogc pure @safe;
+
+/*private
 {
     enum : size_t
     {
@@ -28,7 +32,7 @@ private
         MAXSMALLSIZE = 256-SMALLPAD,
         MAXMEDSIZE = (PAGESIZE / 2) - MEDPAD
     }
-}
+}*/
 
 auto gcStatsPure() nothrow pure
 {
@@ -165,7 +169,7 @@ template isPostblitNoThrow(T) {
  *  arrSize = size of the array in bytes
  *  padSize = size of the padding in bytes
  */
-void __arrayClearPad()(ref BlkInfo info, size_t arrSize, size_t padSize) nothrow pure
+/*void __arrayClearPad()(ref BlkInfo info, size_t arrSize, size_t padSize) nothrow pure
 {
     import core.stdc.string;
     if (padSize > MEDPAD && !(info.attr & BlkAttr.NO_SCAN) && info.base)
@@ -175,7 +179,7 @@ void __arrayClearPad()(ref BlkInfo info, size_t arrSize, size_t padSize) nothrow
         else
             memset(info.base, 0, LARGEPREFIX);
     }
-}
+}*/
 
 /**
  * Allocate an array memory block by applying the proper padding and assigning
@@ -186,36 +190,25 @@ void __arrayClearPad()(ref BlkInfo info, size_t arrSize, size_t padSize) nothrow
  * Returns:
  *  `BlkInfo` with allocation metadata
  */
-BlkInfo __arrayAlloc(T)(size_t arrSize) @trusted
+ArrayMetadata __arrayAlloc(T)(size_t arrSize) @trusted
 {
-    import core.checkedint;
     import core.lifetime : TypeInfoSize;
     import core.internal.traits : hasIndirections;
 
-    enum typeInfoSize = TypeInfoSize!T;
     BlkAttr attr = BlkAttr.APPENDABLE;
-
-    size_t padSize = arrSize > MAXMEDSIZE ?
-        LARGEPAD :
-        ((arrSize > MAXSMALLSIZE ? MEDPAD : SMALLPAD) + typeInfoSize);
-
-    bool overflow;
-    auto paddedSize = addu(arrSize, padSize, overflow);
-
-    if (overflow)
-        return BlkInfo();
 
     /* `extern(C++)` classes don't have a classinfo pointer in their vtable,
      * so the GC can't finalize them.
      */
-    static if (typeInfoSize)
+    static if (TypeInfoSize!T)
         attr |= BlkAttr.STRUCTFINAL | BlkAttr.FINALIZE;
     static if (!hasIndirections!T)
         attr |= BlkAttr.NO_SCAN;
 
-    auto bi = GC.qalloc(paddedSize, attr, typeid(T));
-    __arrayClearPad(bi, arrSize, padSize);
-    return bi;
+    auto ptr = GC.malloc(arrSize, attr, typeid(T));
+    if(ptr)
+        return gc_getArrayMetadata(ptr);
+    return ArrayMetadata.init;
 }
 
 /**
@@ -226,9 +219,9 @@ BlkInfo __arrayAlloc(T)(size_t arrSize) @trusted
  * Returns:
  *  pointer to the start of the array
  */
-void *__arrayStart()(return scope BlkInfo info) nothrow pure
+void *__arrayStart()(return scope ArrayMetadata info) nothrow pure
 {
-    return info.base + ((info.size & BIGLENGTHMASK) ? LARGEPREFIX : 0);
+    return info.base;
 }
 
 /**
@@ -261,113 +254,7 @@ void *__arrayStart()(return scope BlkInfo info) nothrow pure
  *
  * where `elem0` starts 16 bytes after the first byte.
  */
-bool __setArrayAllocLength(T)(ref BlkInfo info, size_t newLength, bool isShared, size_t oldLength = ~0)
+bool __setArrayAllocLength(T)(ref ArrayMetadata info, size_t newLength, bool isShared, size_t oldLength = ~0)
 {
-    import core.atomic;
-    import core.lifetime : TypeInfoSize;
-
-    size_t typeInfoSize = TypeInfoSize!T;
-
-    if (info.size <= 256)
-    {
-        import core.checkedint;
-
-        bool overflow;
-        auto newLengthPadded = addu(newLength,
-                                     addu(SMALLPAD, typeInfoSize, overflow),
-                                     overflow);
-
-        if (newLengthPadded > info.size || overflow)
-            // new size does not fit inside block
-            return false;
-
-        auto length = cast(ubyte *)(info.base + info.size - typeInfoSize - SMALLPAD);
-        if (oldLength != ~0)
-        {
-            if (isShared)
-            {
-                return cas(cast(shared)length, cast(ubyte)oldLength, cast(ubyte)newLength);
-            }
-            else
-            {
-                if (*length == cast(ubyte)oldLength)
-                    *length = cast(ubyte)newLength;
-                else
-                    return false;
-            }
-        }
-        else
-        {
-            // setting the initial length, no cas needed
-            *length = cast(ubyte)newLength;
-        }
-        if (typeInfoSize)
-        {
-            auto typeInfo = cast(TypeInfo*)(info.base + info.size - size_t.sizeof);
-            *typeInfo = cast()typeid(T);
-        }
-    }
-    else if (info.size < PAGESIZE)
-    {
-        if (newLength + MEDPAD + typeInfoSize > info.size)
-            // new size does not fit inside block
-            return false;
-        auto length = cast(ushort *)(info.base + info.size - typeInfoSize - MEDPAD);
-        if (oldLength != ~0)
-        {
-            if (isShared)
-            {
-                return cas(cast(shared)length, cast(ushort)oldLength, cast(ushort)newLength);
-            }
-            else
-            {
-                if (*length == oldLength)
-                    *length = cast(ushort)newLength;
-                else
-                    return false;
-            }
-        }
-        else
-        {
-            // setting the initial length, no cas needed
-            *length = cast(ushort)newLength;
-        }
-        if (typeInfoSize)
-        {
-            auto typeInfo = cast(TypeInfo*)(info.base + info.size - size_t.sizeof);
-            *typeInfo = cast()typeid(T);
-        }
-    }
-    else
-    {
-        if (newLength + LARGEPAD > info.size)
-            // new size does not fit inside block
-            return false;
-        auto length = cast(size_t *)(info.base);
-        if (oldLength != ~0)
-        {
-            if (isShared)
-            {
-                return cas(cast(shared)length, cast(size_t)oldLength, cast(size_t)newLength);
-            }
-            else
-            {
-                if (*length == oldLength)
-                    *length = newLength;
-                else
-                    return false;
-            }
-        }
-        else
-        {
-            // setting the initial length, no cas needed
-            *length = newLength;
-        }
-        if (typeInfoSize)
-        {
-            auto typeInfo = cast(TypeInfo*)(info.base + size_t.sizeof);
-            *typeInfo = cast()typeid(T);
-        }
-    }
-    return true; // resize succeeded
+    return info.setUsed(newLength, oldLength, isShared);
 }
