@@ -22,6 +22,8 @@ extern(C) nothrow {
         size_t __sd_getArrayUsed(void *ptr, size_t pdData, bool atomic) @nogc;
         bool __sd_setArrayUsed(void *ptr, size_t pdData, size_t newUsed, size_t existingUsed, bool atomic) @nogc;
         void __sd_getArrayMetadata(void *ptr, void** base, size_t* size, size_t* flags) @nogc;
+        void __sd_gc_add_roots_ptr(void *ptr, size_t len) @nogc;
+        void __sd_gc_remove_roots(void *ptr) @nogc;
 
         void rt_finalize2(void* p, bool det, bool resetMemory) nothrow;
 }
@@ -342,7 +344,7 @@ final class SnazzyGC : GC
      */
     void addRoot(void* p) nothrow @nogc
     {
-        // TODO: add once there is a hook
+        __sd_gc_add_roots_ptr(p, 0);
     }
 
     /**
@@ -350,7 +352,7 @@ final class SnazzyGC : GC
      */
     void removeRoot(void* p) nothrow @nogc
     {
-        // TODO: add once there is a hook
+        __sd_gc_remove_roots(p);
     }
 
     /**
@@ -367,7 +369,7 @@ final class SnazzyGC : GC
      */
     void addRange(void* p, size_t sz, const TypeInfo ti) nothrow @nogc
     {
-        // TODO: add once there is a hook
+        __sd_gc_add_roots_ptr(p, sz);
     }
 
     /**
@@ -375,7 +377,7 @@ final class SnazzyGC : GC
      */
     void removeRange(void* p) nothrow @nogc
     {
-        // TODO: add once there is a hook
+        __sd_gc_remove_roots(p);
     }
 
     /**

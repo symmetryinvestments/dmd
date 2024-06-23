@@ -412,7 +412,7 @@ $(DRUNTIMESOLIB): $(OBJS) $(SRCS) $(DMD)
 
 ################### Library generation #########################
 
-$(DRUNTIME): $(OBJS) $(SRCS) $(DMD)
+$(DRUNTIME): $(OBJS) $(SRCS) $(DMD) $(SDCALLOC)
 	$(DMD) -lib -of$(DRUNTIME) $(SDCALLOC) -Xfdruntime.json $(DFLAGS) $(SRCS) $(OBJS)
 
 lib: $(DRUNTIME)
