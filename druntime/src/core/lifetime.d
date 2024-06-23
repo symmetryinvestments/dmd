@@ -2830,8 +2830,7 @@ T* _d_newitemT(T)() @trusted
     if (tiSize)
         flags |= GC.BlkAttr.STRUCTFINAL | GC.BlkAttr.FINALIZE;
 
-    auto blkInfo = GC.qalloc(itemSize, flags, typeid(T));
-    auto p = blkInfo.base;
+    auto p = GC.malloc(itemSize, flags, typeid(T));
 
     emplaceInitializer(*(cast(T*) p));
 

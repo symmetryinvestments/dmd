@@ -545,7 +545,6 @@ class ConservativeGC : GC
         retval.base = runLocked!(mallocNoSync, mallocTime, numMallocs)(needed, bits, retval.size, rtInfo);
 
         auto ret = setupMetadata(retval.base[0 .. retval.size], bits, size, context);
-
         if (!(bits & BlkAttr.NO_SCAN))
         {
             memset(ret.ptr + size, 0, ret.length - size);
@@ -1405,7 +1404,7 @@ class ConservativeGC : GC
 
     // get array information from a block
     ArrayMetadata getArrayMetadata(void *ptr) nothrow @trusted @nogc {
-        // use the block info to determine all 
+        // use the block info to determine all
         auto blkinfo = query(ptr);
         if (blkinfo.attr & BlkAttr.APPENDABLE)
         {
@@ -5305,7 +5304,7 @@ private size_t adjustArguments(const size_t size, ref uint bits, const void *con
 // the end if not appendable. The end result is one less pointer-sized chunk that is usable.
 private void[] setupMetadata(void[] block, uint bits, size_t used, const void *context) nothrow
 {
-    if (block.length > MAXMEDSIZE)
+    if (block.length >= PAGESIZE)
     {
         // if we are storing context or used size, we always use up 2
         // size_t at the start of the block.

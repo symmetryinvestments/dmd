@@ -1020,27 +1020,14 @@ Returns:
 */
 extern (C) void* _d_newitemU(scope const TypeInfo _ti) nothrow @weak
 {
-    import core.stdc.stdio;
     auto ti = unqualify(_ti);
-    printf("here, in qalloc: %p\n", cast(void*)ti);
     auto flags = !(ti.flags & 1) ? BlkAttr.NO_SCAN : 0;
     immutable tiSize = structTypeInfoSize(ti);
     immutable itemSize = ti.tsize;
-    immutable size = itemSize + tiSize;
     if (tiSize)
         flags |= BlkAttr.STRUCTFINAL | BlkAttr.FINALIZE;
 
-    auto blkInf = GC.qalloc(size, flags, ti);
-    auto p = blkInf.base;
-
-    if (tiSize)
-    {
-        // the GC might not have cleared the padding area in the block
-        *cast(TypeInfo*)(p + (itemSize & ~(size_t.sizeof - 1))) = null;
-        *cast(TypeInfo*)(p + blkInf.size - tiSize) = cast() ti;
-    }
-
-    return p;
+    return GC.malloc(itemSize, flags, ti);
 }
 
 debug(PRINTF)
