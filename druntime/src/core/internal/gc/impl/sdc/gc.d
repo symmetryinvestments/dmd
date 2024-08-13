@@ -12,19 +12,19 @@ extern(C) nothrow {
         void onOutOfMemoryError(void* pretend_sideffect = null, string file = __FILE__, size_t line = __LINE__) @trusted nothrow @nogc;
 
         // hooks from sdc
-        void __sd_gc_druntime_qalloc(BlkInfo *result, size_t size, uint bits, const(void)*finalizer);
-        //BlkInfo __sd_gc_druntime_qalloc(size_t size, uint bits, void *finalizer);
+        void* __sd_gc_alloc_finalizer(size_t size, void *finalizer);
+        void* __sd_gc_alloc(size_t size);
         void __sd_gc_init();
         void __sd_gc_collect();
         void *__sd_gc_realloc(void *ptr, size_t size);
-        @nogc void *__sd_gc_free(void *ptr);
-        @nogc BlkInfo __sd_gc_druntime_allocInfo(void *ptr);
-        size_t __sd_getArrayUsed(void *ptr, size_t pdData, bool atomic) @nogc;
-        bool __sd_setArrayUsed(void *ptr, size_t pdData, size_t newUsed, size_t existingUsed, bool atomic) @nogc;
-        void __sd_getArrayMetadata(void *ptr, void** base, size_t* size, size_t* flags) @nogc;
-        void __sd_gc_add_roots_ptr(void *ptr, size_t len) @nogc;
+        void *__sd_gc_free(void *ptr) @nogc;
+        bool __sd_gc_fetch_alloc_info(void *ptr, void** base, size_t* size, size_t* gcPrivateData, BlkAttr* flags) @nogc;
+        size_t __sd_gc_get_array_used(void *ptr, size_t pdData) @nogc;
+        bool __sd_gc_set_array_used(void *ptr, size_t pdData, size_t newUsed, size_t existingUsed) @nogc;
+        void __sd_gc_add_roots(void[] range) @nogc;
         void __sd_gc_remove_roots(void *ptr) @nogc;
 
+        // hook to druntime finalization.
         void rt_finalize2(void* p, bool det, bool resetMemory) nothrow;
 }
 
@@ -158,8 +158,7 @@ final class SnazzyGC : GC
      */
     uint getAttr(void* p) nothrow
     {
-        // TODO: add once there is a hook
-        auto blkinfo = __sd_gc_druntime_allocInfo(p);
+        auto blkinfo = query(p);
         return blkinfo.attr;
     }
 
@@ -188,9 +187,14 @@ final class SnazzyGC : GC
     {
         if(!size)
             return null;
-        BlkInfo blkinfo;
-        __sd_gc_druntime_qalloc(&blkinfo, size, bits, context);
-        return blkinfo.base;
+        // TODO, NO_SCAN is not supported, all blocks are scanned, but sdc
+        // does support non-pointer allocations, just not through the C api.
+        void* ctx = (context is null && (bits & BlkAttr.FINALIZE)) ?
+            TYPEINFO_IN_BLOCK : cast(void*)context;
+        if(ctx || (bits & BlkAttr.APPENDABLE))
+            return __sd_gc_alloc_finalizer(size, ctx);
+        else
+            return __sd_gc_alloc(size);
     }
 
     /*
@@ -202,20 +206,14 @@ final class SnazzyGC : GC
         //printf("here, bits are %x\n", bits);
         if(!size)
             return BlkInfo.init;
-        // TODO: deal with finalizer/typeinfo
-        //auto blkinfo = __sd_gc_druntime_qalloc(size, bits, null);
         BlkInfo blkinfo;
-        // need to check if ti is a class
+        auto ctx = (bits & BlkAttr.STRUCTFINAL) ? cast(void*)ti : null;
 
-        // establish the context pointer. If no finalizer is present, then pass null.
-        // if finalize is set,
-        //   if it's a class, then the finalizer will be in the block directly.
-        //   if it's a struct, then the typeinfo will be used to finalize.
-        void *ctx = null;
-        if (bits & BlkAttr.FINALIZE)
-            ctx = (bits & BlkAttr.STRUCTFINAL) ? cast(void*)ti : TYPEINFO_IN_BLOCK;
-
-        __sd_gc_druntime_qalloc(&blkinfo, size, bits, ctx);
+        auto ptr = malloc(size, bits, ctx, null);
+        if(!ptr)
+            return BlkInfo.init;
+        size_t context;
+        __sd_gc_fetch_alloc_info(ptr, &blkinfo.base, &blkinfo.size, &context, cast(BlkAttr*)&blkinfo.attr);
         return blkinfo;
     }
 
@@ -226,25 +224,15 @@ final class SnazzyGC : GC
     {
         if(!size)
             return null;
-        //auto blkinfo = __sd_gc_druntime_qalloc(size, bits, null);
-        BlkInfo blkinfo;
 
         // TODO: need to hook SDC's zero alloc function
-        __sd_gc_druntime_qalloc(&blkinfo, size, bits, context);
-        if(blkinfo.base)
+        auto ptr = malloc(size, bits, context, pointerBitmap);
+        if(ptr)
         {
-            if(!(bits & BlkAttr.NO_SCAN))
-            {
-                // set the data to all 0
-                memset(blkinfo.base, 0, blkinfo.size);
-            }
-            else
-            {
-                // only need to zero out the block that was asked for.
-                memset(blkinfo.base, 0, size);
-            }
+            // zero out the allocated data.
+            memset(ptr, 0, size);
         }
-        return blkinfo.base;
+        return ptr;
     }
 
     /*
@@ -252,7 +240,6 @@ final class SnazzyGC : GC
      */
     void* realloc(void* p, size_t size, uint bits, immutable size_t *ptrBitmap) nothrow
     {
-        // TODO: deal with bits and typeinfo
         return __sd_gc_realloc(p, size);
     }
 
@@ -296,7 +283,7 @@ final class SnazzyGC : GC
      */
     void* addrOf(void* p) nothrow @nogc
     {
-        auto blkinfo = __sd_gc_druntime_allocInfo(p);
+        auto blkinfo = query(p);
         return blkinfo.base;
     }
 
@@ -306,7 +293,7 @@ final class SnazzyGC : GC
      */
     size_t sizeOf(void* p) nothrow @nogc
     {
-        auto blkinfo = __sd_gc_druntime_allocInfo(p);
+        auto blkinfo = query(p);
         return blkinfo.size;
     }
 
@@ -316,7 +303,11 @@ final class SnazzyGC : GC
      */
     BlkInfo query(void* p) nothrow
     {
-        return __sd_gc_druntime_allocInfo(p);
+        BlkInfo result;
+        size_t context;
+        if (__sd_gc_fetch_alloc_info(p, &result.base, &result.size, &context, cast(BlkAttr*)&result.attr))
+            return result;
+        return BlkInfo.init;
     }
 
     /**
@@ -344,7 +335,7 @@ final class SnazzyGC : GC
      */
     void addRoot(void* p) nothrow @nogc
     {
-        __sd_gc_add_roots_ptr(p, 0);
+        __sd_gc_add_roots(p[0 .. 0]);
     }
 
     /**
@@ -369,7 +360,7 @@ final class SnazzyGC : GC
      */
     void addRange(void* p, size_t sz, const TypeInfo ti) nothrow @nogc
     {
-        __sd_gc_add_roots_ptr(p, sz);
+        __sd_gc_add_roots(p[0 .. sz]);
     }
 
     /**
@@ -425,8 +416,20 @@ final class SnazzyGC : GC
     {
         void *base;
         size_t size;
-        size_t flags;
-        __sd_getArrayMetadata(ptr, &base, &size, &flags);
+        size_t flags; // page descriptor
+        BlkAttr attrs;
+        if(!__sd_gc_fetch_alloc_info(ptr, &base, &size, &flags, &attrs))
+            return ArrayMetadata.init;
+
+        // If attrs is not appendable, then this has no metadata and can't be
+        // appended.
+        if(!(attrs & BlkAttr.APPENDABLE))
+            // not appendable
+            return ArrayMetadata.init;
+        if(!(attrs & BlkAttr.FINALIZE) || (flags & ((1 << 6) - 1)) == 0)
+            // either a large block or there is no finalizer in the block.
+            // keep 1 byte between this and any adjacent blocks.
+            size -= 1;
         return ArrayMetadata(base, size, flags);
     }
 
@@ -441,7 +444,7 @@ final class SnazzyGC : GC
      */
     bool setArrayUsed(ref ArrayMetadata metadata, size_t newUsed, size_t existingUsed = ~0UL, bool atomic = false) nothrow @nogc @trusted
     {
-        return __sd_setArrayUsed(metadata.base, metadata._gc_private_flags, newUsed, existingUsed, atomic) ? true : false;
+        return __sd_gc_set_array_used(metadata.base, metadata._gc_private_flags, newUsed, existingUsed);
     }
 
     /**
@@ -451,6 +454,6 @@ final class SnazzyGC : GC
      */
     size_t getArrayUsed(ref ArrayMetadata metadata, bool atomic = false) nothrow @nogc @trusted
     {
-        return __sd_getArrayUsed(metadata.base, metadata._gc_private_flags, atomic);
+        return __sd_gc_get_array_used(metadata.base, metadata._gc_private_flags);
     }
 }
