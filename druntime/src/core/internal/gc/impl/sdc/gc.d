@@ -52,6 +52,9 @@ extern(C) nothrow {
         void __sd_gc_add_roots(void[] range) @nogc;
         void __sd_gc_remove_roots(void *ptr) @nogc;
 
+        void __sd_gc_thread_enter_busy_state() @nogc;
+        void __sd_gc_thread_exit_busy_state() @nogc;
+
         // hook to druntime finalization.
         void rt_finalize2(void* p, bool det, bool resetMemory) nothrow;
 }
@@ -104,7 +107,11 @@ private pragma(crt_constructor) void gc_conservative_ctor()
 extern(C) void _d_register_sdc_gc()
 {
     // HACK: this is going to set up the ThreadCache in SDC for the main thread.
+    __sd_gc_thread_enter_busy_state();
+    scope(exit) __sd_gc_thread_exit_busy_state();
+
     __sd_gc_init();
+
     import core.gc.registry;
     registerGCFactory("sdc", &initialize);
 }
