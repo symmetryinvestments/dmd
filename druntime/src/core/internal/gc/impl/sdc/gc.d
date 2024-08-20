@@ -6,6 +6,34 @@ import core.stdc.string : memcpy, memset, memmove;
 
 import cstdlib = core.stdc.stdlib : calloc, free, malloc, realloc;
 
+// BIG NOTE: SDC uses ALL the block for appending, by just removing the flag
+// saying the block is appendable, for the last byte. However, this currently
+// allows cross-block pointers, where you slice past the end of an array, now
+// you are pointing at the next block. To circumvent this, whenever we allocate
+// an *appendable* block, we request 1 extra byte, and whenever we deal with
+// arrays, we always assume that there is one more byte than the size we have.
+// Note that this is ONLY done with appendable blocks, and not ones that aren't
+// appendable. We must account for this when reading and writing used sizes.
+// HOWEVER, this does not happen for slabs with finalizers, because slabs with
+// finalizers store the finalizers at the end of the slab slot along with the
+// used space. We cheat and use the bits to determine this when allocating and
+// getting the block info.
+
+private int sizeAdjustment(size_t size, uint bits) pure nothrow @nogc @safe
+{
+    if(bits & BlkAttr.APPENDABLE)
+    {
+        // if it will be a large block, then we have to always add 1 byte, regardless of the context
+        if(size >= 14336)
+            return 1;
+        // if there is a context pointer, we don't need to add a buffer byte
+        if(!(bits & BlkAttr.FINALIZE))
+            return 1;
+    }
+    // no size adjustment needed.
+    return 0;
+}
+
 // define all the extern(C) functions we need from libdmalloc
 
 extern(C) nothrow {
@@ -191,6 +219,9 @@ final class SnazzyGC : GC
         // does support non-pointer allocations, just not through the C api.
         void* ctx = (context is null && (bits & BlkAttr.FINALIZE)) ?
             TYPEINFO_IN_BLOCK : cast(void*)context;
+        if(ctx)
+            bits |= BlkAttr.FINALIZE;
+        size += sizeAdjustment(size, bits);
         if(ctx || (bits & BlkAttr.APPENDABLE))
             return __sd_gc_alloc_finalizer(size, ctx);
         else
@@ -214,6 +245,7 @@ final class SnazzyGC : GC
             return BlkInfo.init;
         size_t context;
         __sd_gc_fetch_alloc_info(ptr, &blkinfo.base, &blkinfo.size, &context, cast(BlkAttr*)&blkinfo.attr);
+        blkinfo.size -= sizeAdjustment(blkinfo.size, blkinfo.attr);
         return blkinfo;
     }
 
@@ -306,7 +338,11 @@ final class SnazzyGC : GC
         BlkInfo result;
         size_t context;
         if (__sd_gc_fetch_alloc_info(p, &result.base, &result.size, &context, cast(BlkAttr*)&result.attr))
+        {
+            // determine if we need a size adjustment
+            result.size -= sizeAdjustment(result.size, result.attr);
             return result;
+        }
         return BlkInfo.init;
     }
 
@@ -426,10 +462,7 @@ final class SnazzyGC : GC
         if(!(attrs & BlkAttr.APPENDABLE))
             // not appendable
             return ArrayMetadata.init;
-        if(!(attrs & BlkAttr.FINALIZE) || (flags & ((1 << 6) - 1)) == 0)
-            // either a large block or there is no finalizer in the block.
-            // keep 1 byte between this and any adjacent blocks.
-            size -= 1;
+        size -= sizeAdjustment(size, attrs);
         return ArrayMetadata(base, size, flags);
     }
 
@@ -442,9 +475,13 @@ final class SnazzyGC : GC
      * The return value indicates success or failure.
      * Generally called via the ArrayMetadata method.
      */
-    bool setArrayUsed(ref ArrayMetadata metadata, size_t newUsed, size_t existingUsed = ~0UL, bool atomic = false) nothrow @nogc @trusted
+    bool setArrayUsed(ref ArrayMetadata metadata, size_t newUsed, size_t existingUsed = size_t.max, bool atomic = false) nothrow @nogc @trusted
     {
-        return __sd_gc_set_array_used(metadata.base, metadata._gc_private_flags, newUsed, existingUsed);
+        // if the size is not even, then we have the buffer byte involved
+        int addone = metadata.size & 1;
+        if(existingUsed < size_t.max)
+            existingUsed += addone;
+        return __sd_gc_set_array_used(metadata.base, metadata._gc_private_flags, newUsed + addone, existingUsed);
     }
 
     /**
@@ -454,6 +491,11 @@ final class SnazzyGC : GC
      */
     size_t getArrayUsed(ref ArrayMetadata metadata, bool atomic = false) nothrow @nogc @trusted
     {
-        return __sd_gc_get_array_used(metadata.base, metadata._gc_private_flags);
+        // if the size is not even, then we have the buffer byte involved
+        int addone = metadata.size & 1;
+        auto result = __sd_gc_get_array_used(metadata.base, metadata._gc_private_flags);
+        // defend against wrapping.
+        if(result) result -= addone;
+        return result;
     }
 }
