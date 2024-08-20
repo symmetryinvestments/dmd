@@ -53,7 +53,7 @@ endif
 DMD=../generated/$(OS)/$(BUILD)/$(MODEL)/dmd$(DOTEXE)
 INSTALL_DIR=../../install
 
-SDCALLOC=../../sdc/lib/libdmdalloc.a
+SDCALLOC?=../../sdc/lib/libdmdalloc.a
 
 # directory where the html files for the documentation are placed
 DOC_OUTPUT_DIR=doc
