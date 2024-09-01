@@ -61,7 +61,7 @@ extern(C) nothrow {
 
 enum TYPEINFO_IN_BLOCK = cast(void*)1;
 
-extern(C) void __sd_run_finalizer(void *ptr, size_t size, void *context)
+extern(C) void __sd_gc_finalize(void *ptr, size_t size, void *context)
 {
     import core.stdc.stdio;
 
