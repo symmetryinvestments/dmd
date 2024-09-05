@@ -2278,6 +2278,29 @@ else version (Posix)
         __gshared sem_t suspendCount;
 
 
+        extern (C) void thread_preSuspend( void* sp ) nothrow {
+            // NOTE: Since registers are being pushed and popped from the
+            //       stack, any other stack data used by this function should
+            //       be gone before the stack cleanup code is called below.
+            Thread obj = Thread.getThis();
+            assert(obj !is null);
+
+            if ( !obj.m_lock )
+            {
+                obj.m_curr.tstack = sp;
+            }
+        }
+
+        extern (C) void thread_postSuspend() nothrow {
+            Thread obj = Thread.getThis();
+            assert(obj !is null);
+
+            if ( !obj.m_lock )
+            {
+                obj.m_curr.tstack = obj.m_curr.bstack;
+            }
+        }
+
         extern (C) void thread_suspendHandler( int sig ) nothrow
         in
         {
@@ -2287,16 +2310,8 @@ else version (Posix)
         {
             void op(void* sp) nothrow
             {
-                // NOTE: Since registers are being pushed and popped from the
-                //       stack, any other stack data used by this function should
-                //       be gone before the stack cleanup code is called below.
-                Thread obj = Thread.getThis();
-                assert(obj !is null);
-
-                if ( !obj.m_lock )
-                {
-                    obj.m_curr.tstack = getStackTop();
-                }
+                thread_preSuspend(getStackTop());
+                scope(exit) thread_postSuspend();
 
                 sigset_t    sigres = void;
                 int         status;
@@ -2311,11 +2326,6 @@ else version (Posix)
                 assert( status == 0 );
 
                 sigsuspend( &sigres );
-
-                if ( !obj.m_lock )
-                {
-                    obj.m_curr.tstack = obj.m_curr.bstack;
-                }
             }
             callWithStackShell(&op);
         }
