@@ -1793,6 +1793,10 @@ private extern (D) bool suspend( Thread t ) nothrow @nogc
  * Throws:
  *  ThreadError if the suspend operation fails for a running thread.
  */
+extern (C) void thread_preStopTheWorld() nothrow {
+    Thread.slock.lock_nothrow();
+}
+
 extern (C) void thread_suspendAll() nothrow
 {
     // NOTE: We've got an odd chicken & egg problem here, because while the GC
@@ -1816,7 +1820,7 @@ extern (C) void thread_suspendAll() nothrow
         return;
     }
 
-    Thread.slock.lock_nothrow();
+    thread_preStopTheWorld();
     {
         if ( ++suspendDepth > 1 )
             return;
