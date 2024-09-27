@@ -50,47 +50,6 @@ private void setupContextAndBitmap(uint bits, const TypeInfo ti, ref const(void)
     }
 }
 
-// private array management functions. These forward to the GC
-private extern(C) size_t gc_getArrayMetadataUsed(ref ArrayMetadata amd, bool atomic) pure @safe @nogc nothrow;
-private extern(C) bool gc_setArrayMetadataUsed(ref ArrayMetadata amd, size_t used, size_t existingUsed, bool atomic) pure @safe @nogc nothrow;
-
-// Array metadata is used to manage the array information of a block. Note that
-// the base and flags cannot be set by users, only the used size.
-struct ArrayMetadata
-{
-    pure @safe @nogc nothrow:
-    inout(void*) base() inout => _base;
-    size_t size() const => _size;
-    size_t getUsed(bool atomic = false) pure @safe @nogc nothrow
-    {
-        return gc_getArrayMetadataUsed(this, atomic);
-    }
-
-    bool setUsed(size_t used, size_t existingUsed = ~0UL, bool atomic = false) pure @safe @nogc nothrow
-    {
-        return gc_setArrayMetadataUsed(this, used, existingUsed, atomic);
-    }
-
-    // check if a pointer points at the allocated array space
-    bool contains(void *ptr) const @trusted
-    {
-        return ptr >= _base && ptr < _base + size;
-    }
-
-    // allow checking if the array metadata is valid
-    bool opCast(T : bool)() const => _base !is null;
-
-    // this is for the GC to use.
-    size_t _gc_private_flags() => _gcFlags;
-
-    private
-    {
-        void *_base;
-        size_t _size;
-        size_t _gcFlags; // set by the GC for its own purposes if desired
-    }
-}
-
 interface GC
 {
     /**
@@ -288,26 +247,61 @@ interface GC
     ulong allocatedInCurrentThread() nothrow;
 
     /**
-     * Get array metadata for a specific pointer. Note that the resulting
-     * metadata will point at the block start, not the pointer.
-     */
-    ArrayMetadata getArrayMetadata(void *ptr) @nogc nothrow @safe;
-
-    /**
-     * Set the arraBuild SDC binding to new array runtimey used data size. You must use a metadata struct that you
-     * got from the same GC instance. If existingUsed is ~0, then this
-     * overrides any used value already stored. If it's any other value, the
-     * call only succeeds if the existing used value matches.
+     * Set the used capacity of the array block. This is like a realloc, except
+     * without actually reallocating. If the requested size is smaller, and
+     * setting the size is possible, then it always succeeds, and the array
+     * block is not reallocated.
      *
-     * The return value indicates success or failure.
-     * Generally called via the ArrayMetadata method.
+     * If existingUsed is other than size_t.max, then the new used value is
+     * only set if the existing used value matches in the block. Otherwise, the
+     * used size is always attempted.
+     *
+     * If the requested size would require extending into adjacent memory, and
+     * this is allowed by the allocator, the function will succeed, and the
+     * appropriate memory is appended to the allocation.
+     *
+     * If atomic is true, then this setting is done atomically such that only
+     * one thread may succeed. This can potentially be a slow operation, and
+     * any metadata is not cached by the GC.
+     *
+     * This function will not reallocate into another block. If this fails,
+     * allocating a new block is the only mechanism.
+     *
+     * Params:
+     *   ptr - The pointer to the beginning of the slice to process. Note that
+     *         this may be an interior pointer, and if so, the requested used
+     *         size and existing used size are adjusted accordingly.
+     *   newUsed - The requested used size, based on the pointer.
+     *   existingUsed - Must match the allocation metadata info, or be size_t.max.
+     *   atomic - The allocation is shared between threads, so make sure the
+     *            operation to set the value is atomic.
+     * Returns: true if the operation succeeds.
      */
-    bool setArrayUsed(ref ArrayMetadata metadata, size_t newUsed, size_t existingUsed = ~0UL, bool atomic = false) nothrow @nogc @safe;
+    bool setArrayUsed(void *ptr, size_t newUsed, size_t existingUsed = size_t.max, bool atomic = false) nothrow @safe;
 
     /**
-     * get the array used data size. You must use a metadata struct that you
-     * got from the same GC instance.
-     * Generally called via the ArrayMetadata method.
+     * Ensure capacity for the given array data. The GC will attempt to ensure that the capacity of the given allocation is at least as large as request.
+     *
+     * If the slice does not comprise an appendable allocation, then 0 is returned.
+     *
+     * If it is not possible to ensure the capacity given without reallocating
+     * the slice, then 0 is returned.
+     *
+     * If the request is smaller than the current capacity, then it always
+     * succeeds and returns the current capacity.
+     *
+     * Params:
+     *   ptr - Pointer to the start of the slice. This may be an interior
+     *         pointer, and if so, request and existingUsed are adjusted
+     *         accordingly.
+     *   request - Requested capacity size.
+     *   existingUsed - The existing used size of the array slice. If
+     *         size_t.max, then the GC will not validate the slice before
+     *         attempting to ensure capacity.
+     * Returns:
+     *   0 if The requested operation cannot be performed in-place, or the
+     *   parameters do not describe an appendable allocation. Otherwise, the
+     *   capacity of the slice after the operation is performed.
      */
-    size_t getArrayUsed(ref ArrayMetadata metadata, bool atomic = false) nothrow @nogc @safe;
+    size_t ensureArrayCapacity(void *ptr, size_t request, size_t existingUsed = size_t.max, bool atomic = false) nothrow @nogc @safe;
 }

@@ -1402,95 +1402,161 @@ class ConservativeGC : GC
         stats.allocatedInCurrentThread = bytesAllocated;
     }
 
-    // get array information from a block
-    ArrayMetadata getArrayMetadata(void *ptr) nothrow @trusted @nogc {
-        // use the block info to determine all
-        auto blkinfo = query(ptr);
-        if (blkinfo.attr & BlkAttr.APPENDABLE)
-        {
-            void *base = void;
-            size_t size = void;
-            immutable contextSize =
-                (blkinfo.attr & BlkAttr.STRUCTFINAL) ? (void *).sizeof : 0;
+    bool setArrayUsed(void *ptr, size_t newUsed, size_t existingUsed, bool atomic) nothrow @trusted
+    {
+	// use the block cache when not atomic
+	import core.internal.gc.impl.conservative.blkcache;
+	auto bic = atomic ? null : __getBlkInfo(ptr);
+	auto info = bic ? *bic : query(ptr);
 
-            // get the actual length
-            if (blkinfo.size <= 256)
-            {
-                base = blkinfo.base;
-                size = blkinfo.size - SMALLPAD - contextSize;
-            }
-            else if(blkinfo.size <= PAGESIZE / 2)
-            {
-                base = blkinfo.base;
-                size = blkinfo.size - MEDPAD - contextSize;
-            }
-            else
-            {
-                // large block, it's always LARGEPREFIX bytes at the front.
-                base = blkinfo.base + LARGEPREFIX;
-                size = blkinfo.size - LARGEPAD;
-            }
-            return ArrayMetadata(base, size);
-        }
-        return ArrayMetadata.init;
+
+	if(!(info.attr & BlkAttr.APPENDABLE))
+	    // not appendable
+	    return false;
+	assert(info.base); // sanity check
+
+	// TODO: use atomic operations for reading/writing the size if atomic is true
+	if(info.size < PAGESIZE)
+	{
+	    // in a bin, cannot grow into another block
+	    immutable offset = ptr - info.base;
+	    immutable contextSize = (info.attr & BlkAttr.STRUCTFINAL) ? (void*).sizeof : 0;
+	    immutable usedStoreSize = info.size > 256 ? MEDPAD : SMALLPAD;
+	    immutable maxSize = info.size - contextSize - usedStoreSize;
+
+	    newSize += offset;
+	    if(newSize > maxSize)
+		// impossible to grow this much
+		return false;
+	    // find the place where the used length is stored
+	    void *lenptr = info.base + maxSize;
+	    if(existingUsed != size_t.max)
+	    {
+		existingUsed += offset;
+		if((usedStoreSize == 2 ? *(cast(ushort*)lenptr) : *(cast(ubyte*)lenptr)) != existingUsed)
+		    // user did not pass in the correct used size.
+		    return false;
+	    }
+	    if(usedStoreSize == 2)
+		*(cast(ushort*)lenptr) = cast(ushort)newSize;
+	    else
+		*(cast(ubyte*)lenptr) = cast(ubyte)newSize;
+	    if(!bic && !atomic)
+		// cache the lookup for next time.
+		__insertBlkInfoCache(info, null);
+	    return true;
+	}
+	else
+	{
+	    immutable offset = ptr - info.base - LARGEPREFIX;
+	    newSize += offset;
+	    // validate we can set the used space.
+	    if(existingUsed != size_t.max)
+	    {
+		existingUsed += offset;
+		&& *(cast(size_t*)info.base) != existingUsed)
+		    // not extendable in place.
+		    return false;
+	    }
+	    // page size or greater. the used size is in the first word of the
+	    // allocation. we must leave 1 byte at the end to prevent
+	    // accidentally pointing at the next block.
+	    immutable maxSize = info.size - LARGEPAD;
+	    if(newSize > maxSize)
+	    {
+		// see if we can extend into subsequent pages
+		immutable requiredExtension = newSize - maxSize;
+		auto extendedSize = extend(info.base, requiredExtension, requiredExtension);
+		if(extendedSize == 0)
+		    // could not extend, can't satisfy the request
+		    return false;
+		// success!
+		info.size = extendedSize;
+		// update the block info cache if was used.
+		if(bic)
+		    bic.size = extendedSize;
+	    }
+	    *(cast(size_t*)info.base) = newUsed;
+	    if(!bic && !atomic)
+		// cache the lookup for next time
+		__insertBlkInfoCache(info, null);
+	    return true;
+	}
     }
 
-    size_t getArrayUsed(ref ArrayMetadata metadata, bool atomic) nothrow @nogc @trusted
+    size_t ensureArrayCapacity(void *ptr, size_t request, size_t existingUsed, bool atomic)
     {
-        if(metadata.base is null)
-            // sanity check
-            return 0;
+	// use the block cache when not atomic
+	import core.internal.gc.impl.conservative.blkcache;
+	auto bic = atomic ? null : __getBlkInfo(ptr);
+	auto info = bic ? *bic : query(ptr);
 
-        // Use the fact that we set the size up to end on the array length field.
-        if (metadata.size <= 256)
-            return *cast(ubyte*)(metadata.base + metadata.size);
-        else if(metadata.size <= PAGESIZE / 2)
-            return *cast(ushort*)(metadata.base + metadata.size);
-        else
-            // large block, it's the 2 words before the metadata pointer.
-            return *(cast(size_t*)metadata.base - 2);
-    }
 
-    bool setArrayUsed(ref ArrayMetadata metadata, size_t used, size_t existingUsed, bool atomic) nothrow @nogc @trusted
-    {
-        if(metadata.base is null)
-            // sanity check
-            return false;
-        // Determine the length of the block
-        immutable sz = metadata.size();
-        if(used > sz)
-            // invalid size
-            return false;
-        if(sz < 256)
-        {
-            // small block
-            auto lenptr = cast(ubyte *)(metadata.base + sz);
-            if(existingUsed == -1 || *lenptr == existingUsed)
-            {
-                *lenptr = cast(ubyte)used;
-                return true;
-            }
-        }
-        else if(sz < PAGESIZE / 2)
-        {
-            // medium block
-            auto lenptr = cast(ushort *)(metadata.base + sz);
-            if(existingUsed == -1 || *lenptr == existingUsed)
-            {
-                *lenptr = cast(ushort)used;
-                return true;
-            }
-        }
-        else
-        {
-            auto lenptr = cast(size_t*)metadata.base - 2;
-            if(existingUsed == -1 || *lenptr == existingUsed)
-            {
-                *lenptr = used;
-                return true;
-            }
-        }
-        return false;
+	if(!(info.attr & BlkAttr.APPENDABLE))
+	    // not appendable
+	    return 0;
+	assert(info.base); // sanity check
+
+	size_t offset = void;
+	size_t blockSize = void;
+
+	if(info.size < PAGESIZE)
+	{
+	    // in a bin, cannot grow into another block
+	    offset = ptr - info.base;
+	    immutable contextSize = (info.attr & BlkAttr.STRUCTFINAL) ? (void*).sizeof : 0;
+	    immutable usedStoreSize = info.size > 256 ? MEDPAD : SMALLPAD;
+	    blockSize = info.size - contextSize - usedStoreSize;
+
+	    newSize += offset;
+	    if(newSize > blockSize)
+		// impossible to grow this much
+		return 0;
+	    // find the place where the used length is stored
+	    void *lenptr = info.base + blockSize;
+	    if(existingUsed != size_t.max)
+	    {
+		existingUsed += offset;
+		if((usedStoreSize == 2 ? *(cast(ushort*)lenptr) : *(cast(ubyte*)lenptr)) != existingUsed)
+		    // user did not pass in the correct used size.
+		    return 0;
+	    }
+	}
+	else
+	{
+	    offset = ptr - info.base - LARGEPREFIX;
+	    newSize += offset;
+	    // validate we can set the used space.
+	    if(existingUsed != size_t.max)
+	    {
+		existingUsed += offset;
+		&& *(cast(size_t*)info.base) != existingUsed)
+		    // not extendable in place.
+		    return 0;
+	    }
+	    // page size or greater. the used size is in the first word of the
+	    // allocation. we must leave 1 byte at the end to prevent
+	    // accidentally pointing at the next block.
+	    blockSize = info.size - LARGEPAD;
+	    if(newSize > blockSize)
+	    {
+		// see if we can extend into subsequent pages
+		immutable requiredExtension = newSize - blockSize;
+		auto extendedSize = extend(info.base, requiredExtension, requiredExtension);
+		if(extendedSize == 0)
+		    // could not extend, can't satisfy the request
+		    return false;
+		// success!
+		info.size = extendedSize;
+		// update the block info cache if was used.
+		if(bic)
+		    bic.size = extendedSize;
+		blockSize = extendedSize - LARGEPAD;
+	    }
+	}
+	if(!bic && !atomic)
+	    __insertBlkInfoCache(info, null);
+	return blockSize - offset;
     }
 }
 
