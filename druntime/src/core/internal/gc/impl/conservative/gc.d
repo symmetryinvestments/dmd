@@ -783,7 +783,16 @@ class ConservativeGC : GC
 
     size_t extend(void* p, size_t minsize, size_t maxsize) nothrow
     {
-        return runLocked!(extendNoSync, extendTime, numExtends)(p, minsize, maxsize);
+	auto result = runLocked!(extendNoSync, extendTime, numExtends)(p, minsize, maxsize);
+	if(result != 0) {
+	    import core.internal.gc.impl.conservative.blkcache;
+	    // clear the block info from the cache if it exists, it is no longer valid.
+	    if(auto bic = __getBlkInfo(p))
+	    {
+		*bic = BlkInfo.init;
+	    }
+	}
+	return result;
     }
 
 
@@ -971,9 +980,15 @@ class ConservativeGC : GC
         }
         pool.clrBits(biti, ~BlkAttr.NONE);
 
+	// if it's in the block info cache, make sure to remove it from the cache.
+	import core.internal.gc.impl.conservative.blkcache;
+	if(auto bic = __getBlkInfo(p))
+	{
+	    *bic = BlkInfo.init;
+	}
+
         gcx.leakDetector.log_free(sentinel_add(p), ssize);
     }
-
 
     /**
      * Determine the base address of the block containing p.  If p is not a gc
@@ -1510,7 +1525,7 @@ class ConservativeGC : GC
 		info.size = extendedSize;
 		// update the block info cache if was used.
 		if(bic)
-		    bic.size = extendedSize;
+		    *bic = info;
 	    }
 	    *(cast(size_t*)info.base) = newUsed;
 	    if(!bic && !atomic)
@@ -1586,7 +1601,7 @@ class ConservativeGC : GC
 		info.size = extendedSize;
 		// update the block info cache if was used.
 		if(bic)
-		    bic.size = extendedSize;
+		    *bic = info;
 		blockSize = extendedSize - LARGEPAD;
 	    }
 	}
@@ -5426,6 +5441,12 @@ private size_t adjustArguments(const size_t size, ref uint bits, const void *con
 // the end if not appendable. The end result is one less pointer-sized chunk that is usable.
 private void[] setupMetadata(void[] block, uint bits, size_t used, const void *context) nothrow
 {
+    // if the block is in the cache, make sure it's removed
+    import core.internal.gc.impl.conservative.blkcache;
+    if(auto bic = __getBlkInfo(block.ptr))
+    {
+	*bic = BlkInfo.init;
+    }
     if (block.length >= PAGESIZE)
     {
         // if we are storing context or used size, we always use up 2
@@ -5455,7 +5476,7 @@ private void[] setupMetadata(void[] block, uint bits, size_t used, const void *c
         // pointer).
         if (bits & BlkAttr.APPENDABLE)
         {
-            if (block.length > MAXSMALLSIZE)
+            if (block.length > 256)
             {
                 pend -= ushort.sizeof;
                 *cast(ushort*)pend = cast(ushort)used;

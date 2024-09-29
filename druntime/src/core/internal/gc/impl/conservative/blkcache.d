@@ -5,6 +5,10 @@ import core.memory;
 alias BlkInfo = GC.BlkInfo;
 alias int delegate(void* addr) nothrow IsMarkedDg;
 
+version(unittest) {
+    extern(C) GC.BlkInfo gc_query(void*ptr) @nogc nothrow;
+}
+
 
 /**
   cache for the lookup of the block info
@@ -96,6 +100,8 @@ unittest
   */
 BlkInfo *__getBlkInfo(void *interior) nothrow @nogc
 {
+    if (!__blkcache_storage)
+	return null;
     BlkInfo *ptr = __blkcache;
     version (single_cache)
     {
@@ -116,17 +122,30 @@ BlkInfo *__getBlkInfo(void *interior) nothrow @nogc
     {
         // try to do a smart lookup, using __nextBlkIdx as the "head"
         auto curi = ptr + __nextBlkIdx;
-        for (auto i = curi; i >= ptr; --i)
+	auto i = curi;
+	/*version(unittest) {
+	    scope(exit) {
+		if(i)
+		{
+		    // validate the cache always matches the real value
+		    auto realblk = gc_query(interior);
+		    assert(*i == realblk);
+		}
+	    }
+	}*/
+
+        for (; i >= ptr; --i)
         {
             if (i.base && i.base <= interior && cast(size_t)(interior - i.base) < i.size)
                 return i;
         }
 
-        for (auto i = ptr + N_CACHE_BLOCKS - 1; i > curi; --i)
+        for (i = ptr + N_CACHE_BLOCKS - 1; i > curi; --i)
         {
             if (i.base && i.base <= interior && cast(size_t)(interior - i.base) < i.size)
                 return i;
         }
+	version(unittest) i = null;
     }
     return null; // not in cache.
 }

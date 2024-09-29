@@ -264,7 +264,7 @@ extern(C) void _d_arrayshrinkfit(const TypeInfo ti, void[] arr) nothrow
 	{
 	    auto oldArr = gc_getArrayUsed(arr.ptr, isshared);
 	    if(oldArr.ptr is null)
-		// not a valid pointer
+		// not a valid GC pointer
 		return;
 	    auto oldEnd = oldArr.ptr + oldArr.length;
 	    auto newEnd = arr.ptr + cursize;
@@ -282,11 +282,8 @@ extern(C) void _d_arrayshrinkfit(const TypeInfo ti, void[] arr) nothrow
 	    }
 	}
     }
-    if(!gc_setArrayUsed(arr.ptr, cursize, size_t.max, isshared))
-    {
-	import core.exception : onInvalidMemoryOperationError;
-	onInvalidMemoryOperationError();
-    }
+    // don't care if this fails. If it does, we aren't in a valid GC block anyway.
+    gc_setArrayUsed(arr.ptr, cursize, size_t.max, isshared);
 }
 
 package bool hasPostblit(in TypeInfo ti) nothrow pure
@@ -400,6 +397,11 @@ Lcontinue:
     if(curCapacity != 0)
 	// in-place worked!
 	return curCapacity / size;
+
+    if(reqsize <= datasize)
+	// requested size is less than array size, no need to malloc. But there
+	// is no capacity to return.
+	return 0;
 
     // allocate a new block, to hold the data, and copy the existing data.
     // TODO: this probably isn't correct for shared arrays
@@ -1140,6 +1142,13 @@ byte[] _d_arrayappendcTX(const TypeInfo ti, return scope ref byte[] px, size_t n
 	// could not set the size, we must reallocate.
 	auto newcap = newCapacity(newlength, sizeelem);
         auto newArr = gc_malloc(newcap, __typeAttrs(tinext) | BlkAttr.APPENDABLE, tinext);
+	if(newsize != newcap)
+	{
+	    // need to adjust the used space, as it defaults to the size of the
+	    // requested data.
+	    auto setUsedResult = gc_setArrayUsed(newArr, newsize, size_t.max, isshared);
+	    assert(setUsedResult);
+	}
         memcpy(newArr, px.ptr, size);
         // do postblit processing
         __doPostblit(newArr, size, tinext);
