@@ -259,7 +259,7 @@ interface GC
      * Returns: Current array slice, or null if the pointer does not point to a
      *   valid appendable GC block.
      */
-    void[] getArrayUsed(void *ptr, bool atomic) nothrow @safe @nogc;
+    void[] getArrayUsed(void *ptr, bool atomic = false) nothrow @safe @nogc;
 
     /**
      * Set the used capacity of the array block. This is like a realloc, except

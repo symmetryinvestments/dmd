@@ -15,6 +15,10 @@ module rt.lifetime;
 import core.attribute : weak;
 import core.memory;
 
+import core.internal.gc.proxy;
+
+extern(C) void *gc_malloc(size_t sz, uint ba = 0, const scope TypeInfo ti = null) nothrow pure;
+
 debug(PRINTF) import core.stdc.stdio;
 static import rt.tlsgc;
 
@@ -218,7 +222,7 @@ inout(TypeInfo) unqualify(return scope inout(TypeInfo) cti) pure nothrow @nogc
 /**
   get the attributes that should be used when allocating a block containing a type
   */
-private BlkAttr __typeAttrs(const scope TypeInfo ti) pure nothrow
+private uint __typeAttrs(const scope TypeInfo ti) pure nothrow
 {
     uint attr = (!(ti.flags & 1) ? BlkAttr.NO_SCAN : 0) | BlkAttr.APPENDABLE;
     if (typeid(ti) is typeid(TypeInfo_Struct))
@@ -258,7 +262,7 @@ extern(C) void _d_arrayshrinkfit(const TypeInfo ti, void[] arr) nothrow
 	auto sti = cast(TypeInfo_Struct)cast(void*)tinext;
 	if (sti.xdtor)
 	{
-	    auto oldArr = GC.getArrayUsed(arr.ptr, isshared);
+	    auto oldArr = gc_getArrayUsed(arr.ptr, isshared);
 	    if(oldArr.ptr is null)
 		// not a valid pointer
 		return;
@@ -278,7 +282,7 @@ extern(C) void _d_arrayshrinkfit(const TypeInfo ti, void[] arr) nothrow
 	    }
 	}
     }
-    if(!GC.setArrayUsed(arr.ptr, cursize, size_t.max, isshared))
+    if(!gc_setArrayUsed(arr.ptr, cursize, size_t.max, isshared))
     {
 	import core.exception : onInvalidMemoryOperationError;
 	onInvalidMemoryOperationError();
@@ -423,13 +427,13 @@ Lcontinue:
 
     // set up the correct length. Note that because malloc automatically sets
     // the used size based on the requested size, this is needed.
-    auto setUsedResult = gc_setArrayUsed(newarr, datasize, atomic: isshared);
+    auto setUsedResult = gc_setArrayUsed(newarr, datasize, size_t.max, isshared);
     assert(setUsedResult);
 
     *p = newarr[0 .. (*p).length];
 
-    auto curCapacity = gc_ensureArrayCapacity(newarr, 0, datasize, atomic);
-    assert(curCapacity)
+    curCapacity = gc_ensureArrayCapacity(newarr, 0, datasize, isshared);
+    assert(curCapacity);
     return curCapacity / size;
 }
 
@@ -1139,7 +1143,7 @@ byte[] _d_arrayappendcTX(const TypeInfo ti, return scope ref byte[] px, size_t n
         memcpy(newArr, px.ptr, size);
         // do postblit processing
         __doPostblit(newArr, size, tinext);
-        px = newdata[0 .. newlength];
+        px = cast(byte[])newArr[0 .. newlength];
         return px;
     }
 

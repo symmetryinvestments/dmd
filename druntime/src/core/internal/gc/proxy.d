@@ -301,4 +301,9 @@ extern (C)
     {
         return instance.setArrayUsed(ptr, newUsed, existingUsed, atomic);
     }
+
+    void[] gc_getArrayUsed(void *ptr, bool atomic) nothrow @trusted
+    {
+        return instance.getArrayUsed(ptr, atomic);
+    }
 }

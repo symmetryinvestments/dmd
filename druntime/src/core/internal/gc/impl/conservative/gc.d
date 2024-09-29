@@ -1460,8 +1460,8 @@ class ConservativeGC : GC
 	    immutable usedStoreSize = info.size > 256 ? MEDPAD : SMALLPAD;
 	    immutable maxSize = info.size - contextSize - usedStoreSize;
 
-	    newSize += offset;
-	    if(newSize > maxSize)
+	    newUsed += offset;
+	    if(newUsed > maxSize)
 		// impossible to grow this much
 		return false;
 	    // find the place where the used length is stored
@@ -1474,9 +1474,9 @@ class ConservativeGC : GC
 		    return false;
 	    }
 	    if(usedStoreSize == 2)
-		*(cast(ushort*)lenptr) = cast(ushort)newSize;
+		*(cast(ushort*)lenptr) = cast(ushort)newUsed;
 	    else
-		*(cast(ubyte*)lenptr) = cast(ubyte)newSize;
+		*(cast(ubyte*)lenptr) = cast(ubyte)newUsed;
 	    if(!bic && !atomic)
 		// cache the lookup for next time.
 		__insertBlkInfoCache(info, null);
@@ -1485,12 +1485,12 @@ class ConservativeGC : GC
 	else
 	{
 	    immutable offset = ptr - info.base - LARGEPREFIX;
-	    newSize += offset;
+	    newUsed += offset;
 	    // validate we can set the used space.
 	    if(existingUsed != size_t.max)
 	    {
 		existingUsed += offset;
-		&& *(cast(size_t*)info.base) != existingUsed)
+		if(*(cast(size_t*)info.base) != existingUsed)
 		    // not extendable in place.
 		    return false;
 	    }
@@ -1498,10 +1498,10 @@ class ConservativeGC : GC
 	    // allocation. we must leave 1 byte at the end to prevent
 	    // accidentally pointing at the next block.
 	    immutable maxSize = info.size - LARGEPAD;
-	    if(newSize > maxSize)
+	    if(newUsed > maxSize)
 	    {
 		// see if we can extend into subsequent pages
-		immutable requiredExtension = newSize - maxSize;
+		immutable requiredExtension = newUsed - maxSize;
 		auto extendedSize = extend(info.base, requiredExtension, requiredExtension);
 		if(extendedSize == 0)
 		    // could not extend, can't satisfy the request
@@ -1520,7 +1520,7 @@ class ConservativeGC : GC
 	}
     }
 
-    size_t ensureArrayCapacity(void *ptr, size_t request, size_t existingUsed, bool atomic)
+    size_t ensureArrayCapacity(void *ptr, size_t request, size_t existingUsed, bool atomic) @trusted
     {
 	// use the block cache when not atomic
 	import core.internal.gc.impl.conservative.blkcache;
@@ -1544,8 +1544,8 @@ class ConservativeGC : GC
 	    immutable usedStoreSize = info.size > 256 ? MEDPAD : SMALLPAD;
 	    blockSize = info.size - contextSize - usedStoreSize;
 
-	    newSize += offset;
-	    if(newSize > blockSize)
+	    request += offset;
+	    if(request > blockSize)
 		// impossible to grow this much
 		return 0;
 	    // find the place where the used length is stored
@@ -1561,12 +1561,12 @@ class ConservativeGC : GC
 	else
 	{
 	    offset = ptr - info.base - LARGEPREFIX;
-	    newSize += offset;
+	    request += offset;
 	    // validate we can set the used space.
 	    if(existingUsed != size_t.max)
 	    {
 		existingUsed += offset;
-		&& *(cast(size_t*)info.base) != existingUsed)
+		if(*(cast(size_t*)info.base) != existingUsed)
 		    // not extendable in place.
 		    return 0;
 	    }
@@ -1574,10 +1574,10 @@ class ConservativeGC : GC
 	    // allocation. we must leave 1 byte at the end to prevent
 	    // accidentally pointing at the next block.
 	    blockSize = info.size - LARGEPAD;
-	    if(newSize > blockSize)
+	    if(request > blockSize)
 	    {
 		// see if we can extend into subsequent pages
-		immutable requiredExtension = newSize - blockSize;
+		immutable requiredExtension = request - blockSize;
 		auto extendedSize = extend(info.base, requiredExtension, requiredExtension);
 		if(extendedSize == 0)
 		    // could not extend, can't satisfy the request

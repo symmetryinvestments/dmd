@@ -244,18 +244,18 @@ class ProtoGC : GC
         return stats().allocatedInCurrentThread;
     }
 
-    ArrayMetadata getArrayMetadata(void *ptr)
-    {
-        return ArrayMetadata.init;
-    }
-
-    bool setArrayUsed(ref ArrayMetadata metadata, size_t newUsed, size_t existingUsed = ~0UL, bool atomic = false)
+    bool setArrayUsed(void *ptr, size_t newUsed, size_t existingUsed = ~0UL, bool atomic = false)
     {
         return false;
     }
 
-    size_t getArrayUsed(ref ArrayMetadata metadata, bool atomic = false)
+    void[] getArrayUsed(void *ptr, bool atomic)
     {
-        return 0;
+        return null;
+    }
+
+    size_t ensureArrayCapacity(void *ptr, size_t request, size_t existingUsed = ~0UL, bool atomic = false)
+    {
+	return 0;
     }
 }

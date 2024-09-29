@@ -3,6 +3,8 @@ import core.attribute;
 import core.memory;
 
 alias BlkInfo = GC.BlkInfo;
+alias int delegate(void* addr) nothrow IsMarkedDg;
+
 
 /**
   cache for the lookup of the block info
@@ -31,7 +33,7 @@ else
     int __nextBlkIdx;
 }
 
-@property BlkInfo *__blkcache() nothrow
+@property BlkInfo *__blkcache() nothrow @nogc
 {
     if (!__blkcache_storage)
     {
@@ -59,10 +61,12 @@ else
 
 
 // we expect this to be called with the lock in place
-void processGCMarks(BlkInfo* cache, scope rt.tlsgc.IsMarkedDg isMarked) nothrow
+// TODO: this is hooked to every GC implementation, we should make sure it only
+// gets called when needed.
+void processGCMarks(BlkInfo* cache, scope IsMarkedDg isMarked) nothrow
 {
     // called after the mark routine to eliminate block cache data when it
-    // might be ready to sweep
+    // might be ready to sweep. Clear it out so we don't have stale references
     if(cache)
     {
 	cache[0 .. N_CACHE_BLOCKS] = BlkInfo.init;
@@ -90,7 +94,7 @@ unittest
         the base ptr as an indication of whether the struct is valid, or set
         the BlkInfo as a side-effect and return a bool to indicate success.
   */
-BlkInfo *__getBlkInfo(void *interior) nothrow
+BlkInfo *__getBlkInfo(void *interior) nothrow @nogc
 {
     BlkInfo *ptr = __blkcache;
     version (single_cache)
@@ -127,7 +131,7 @@ BlkInfo *__getBlkInfo(void *interior) nothrow
     return null; // not in cache.
 }
 
-void __insertBlkInfoCache(BlkInfo bi, BlkInfo *curpos) nothrow
+void __insertBlkInfoCache(BlkInfo bi, BlkInfo *curpos) nothrow @nogc
 {
     version (single_cache)
     {
