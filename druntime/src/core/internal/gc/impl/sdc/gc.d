@@ -107,8 +107,8 @@ extern(C) void _d_register_sdc_gc()
 {
     __sd_gc_init();
 
-    import core.gc.registry;
-    registerGCFactory("sdc", &initialize);
+    /*import core.gc.registry;
+    registerGCFactory("sdc", &initialize);*/
 }
 
 alias ThreadScanFn = extern(C) void function(void *context, void *start, void *end) nothrow;
@@ -134,7 +134,7 @@ extern(C) void thread_scanAll_C(void *context, ThreadScanFn scanFn)
 
 // since all the real work is done in the SDC library, the class is just a
 // shim, and can just be initialized at compile time.
-private __gshared SnazzyGC instance = new SnazzyGC;
+/+private __gshared SnazzyGC instance = new SnazzyGC;
 
 private GC initialize()
 {
@@ -510,4 +510,4 @@ final class SnazzyGC : GC
         if(result) result -= addone;
         return result;
     }
-}
+}+/

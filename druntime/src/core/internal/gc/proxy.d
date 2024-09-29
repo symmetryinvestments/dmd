@@ -292,18 +292,13 @@ extern (C)
         }
     }
 
-    ArrayMetadata gc_getArrayMetadata(void *ptr) nothrow @nogc @trusted
+    size_t gc_ensureArrayCapacity(void *ptr, size_t targetCapacity, size_t existingUsed, bool atomic) nothrow @trusted
     {
-        return instance.getArrayMetadata(ptr);
+        return instance.ensureArrayCapacity(ptr, targetCapacity, existingUsed, atomic);
     }
 
-    size_t gc_ensureArrayCapacity(ref ArrayMetadata meta, size_t targetCapacity, size_t existingUsed, bool atomic) nothrow @nogc @trusted
+    size_t gc_setArrayUsed(void *ptr, size_t newUsed, size_t existingUsed, bool atomic) nothrow @trusted
     {
-        return instance.ensureArrayCapacity(meta, request, existingUsed, atomic);
-    }
-
-    size_t gc_setArrayMetadataUsed(ref ArrayMetadata meta, size_t used, size_t existingUsed, bool atomic) nothrow @nogc @trusted
-    {
-        return instance.setArrayUsed(meta, used, existingUsed, atomic);
+        return instance.setArrayUsed(ptr, newUsed, existingUsed, atomic);
     }
 }

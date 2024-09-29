@@ -247,6 +247,21 @@ interface GC
     ulong allocatedInCurrentThread() nothrow;
 
     /**
+     * Get the current used capacity of an array block. Note that this is only
+     * needed if you are about to change the array used size and need to deal
+     * with the memory that is about to go away. For appending or shrinking
+     * arrays that have no destructors, you probably don't need this function.
+     * Params:
+     *   ptr - The pointer to check. This can be an interior pointer, but if it
+     *       is beyond the end of the used space, the return value may not be
+     *       valid.
+     *   atomic - If true, the value is fetched atomically (for shared arrays)
+     * Returns: Current array slice, or null if the pointer does not point to a
+     *   valid appendable GC block.
+     */
+    void[] getArrayUsed(void *ptr, bool atomic) nothrow @safe @nogc;
+
+    /**
      * Set the used capacity of the array block. This is like a realloc, except
      * without actually reallocating. If the requested size is smaller, and
      * setting the size is possible, then it always succeeds, and the array
@@ -303,5 +318,5 @@ interface GC
      *   parameters do not describe an appendable allocation. Otherwise, the
      *   capacity of the slice after the operation is performed.
      */
-    size_t ensureArrayCapacity(void *ptr, size_t request, size_t existingUsed = size_t.max, bool atomic = false) nothrow @nogc @safe;
+    size_t ensureArrayCapacity(void *ptr, size_t request, size_t existingUsed = size_t.max, bool atomic = false) nothrow @safe;
 }

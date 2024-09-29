@@ -1402,6 +1402,42 @@ class ConservativeGC : GC
         stats.allocatedInCurrentThread = bytesAllocated;
     }
 
+    void[] getArrayUsed(void *ptr, bool atomic) nothrow @trusted @nogc
+    {
+	// use the block cache when not atomic
+	import core.internal.gc.impl.conservative.blkcache;
+	auto bic = atomic ? null : __getBlkInfo(ptr);
+	auto info = bic ? *bic : query(ptr);
+
+
+	if(!(info.attr & BlkAttr.APPENDABLE))
+	    // not appendable
+	    return null;
+
+	assert(info.base); // sanity check
+	if(!bic && !atomic)
+	    // cache the lookup for next time
+	    __insertBlkInfoCache(info, null);
+
+	// TODO: use atomic operations for reading/writing the size if atomic is true
+	if(info.size < PAGESIZE)
+	{
+	    immutable contextSize = (info.attr & BlkAttr.STRUCTFINAL) ? (void*).sizeof : 0;
+	    immutable usedStoreSize = info.size > 256 ? MEDPAD : SMALLPAD;
+	    immutable maxSize = info.size - contextSize - usedStoreSize;
+
+	    // find the place where the used length is stored
+	    void *lenptr = info.base + maxSize;
+	    size_t usedSize = usedStoreSize == 2 ? *(cast(ushort*)lenptr) : *(cast(ubyte*)lenptr);
+	    return info.base[0 .. usedSize];
+	}
+	else
+	{
+	    auto result = *(cast(size_t*)info.base);
+	    return info.base[LARGEPREFIX .. LARGEPREFIX + result];
+	}
+    }
+
     bool setArrayUsed(void *ptr, size_t newUsed, size_t existingUsed, bool atomic) nothrow @trusted
     {
 	// use the block cache when not atomic
