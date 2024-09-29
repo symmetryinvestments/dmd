@@ -11,13 +11,9 @@ module core.internal.array.utils;
 
 import core.internal.traits : Parameters;
 import core.memory : GC;
-import core.gc.gcinterface : ArrayMetadata;
 
 //alias BlkInfo = GC.BlkInfo;
 alias BlkAttr = GC.BlkAttr;
-
-// fake pure
-extern(C) ArrayMetadata gc_getArrayMetadata(void *ptr) nothrow @nogc pure @safe;
 
 /*private
 {
@@ -160,28 +156,6 @@ template isPostblitNoThrow(T) {
 }
 
 /**
- * Clear padding that might not be zeroed by the GC (it assumes it is within the
- * requested size from the start, but it is actually at the end of the allocated
- * block).
- *
- * Params:
- *  info = array allocation data
- *  arrSize = size of the array in bytes
- *  padSize = size of the padding in bytes
- */
-/*void __arrayClearPad()(ref BlkInfo info, size_t arrSize, size_t padSize) nothrow pure
-{
-    import core.stdc.string;
-    if (padSize > MEDPAD && !(info.attr & BlkAttr.NO_SCAN) && info.base)
-    {
-        if (info.size < PAGESIZE)
-            memset(info.base + arrSize, 0, padSize);
-        else
-            memset(info.base, 0, LARGEPREFIX);
-    }
-}*/
-
-/**
  * Allocate an array memory block by applying the proper padding and assigning
  * block attributes if not inherited from the existing block.
  *
@@ -190,7 +164,7 @@ template isPostblitNoThrow(T) {
  * Returns:
  *  `BlkInfo` with allocation metadata
  */
-ArrayMetadata __arrayAlloc(T)(size_t arrSize) @trusted
+void[] __arrayAlloc(T)(size_t arrSize) @trusted
 {
     import core.lifetime : TypeInfoSize;
     import core.internal.traits : hasIndirections;
@@ -207,54 +181,6 @@ ArrayMetadata __arrayAlloc(T)(size_t arrSize) @trusted
 
     auto ptr = GC.malloc(arrSize, attr, typeid(T));
     if(ptr)
-        return gc_getArrayMetadata(ptr);
-    return ArrayMetadata.init;
-}
-
-/**
- * Get the start of the array for the given block.
- *
- * Params:
- *  info = array metadata
- * Returns:
- *  pointer to the start of the array
- */
-void *__arrayStart()(return scope ArrayMetadata info) nothrow pure
-{
-    return info.base;
-}
-
-/**
- * Set the allocated length of the array block.  This is called when an array
- * is appended to or its length is set.
- *
- * The allocated block looks like this for blocks < PAGESIZE:
- * `|elem0|elem1|elem2|...|elemN-1|emptyspace|N*elemsize|`
- *
- * The size of the allocated length at the end depends on the block size:
- *      a block of 16 to 256 bytes has an 8-bit length.
- *      a block with 512 to pagesize/2 bytes has a 16-bit length.
- *
- * For blocks >= pagesize, the length is a size_t and is at the beginning of the
- * block.  The reason we have to do this is because the block can extend into
- * more pages, so we cannot trust the block length if it sits at the end of the
- * block, because it might have just been extended.  If we can prove in the
- * future that the block is unshared, we may be able to change this, but I'm not
- * sure it's important.
- *
- * In order to do put the length at the front, we have to provide 16 bytes
- * buffer space in case the block has to be aligned properly.  In x86, certain
- * SSE instructions will only work if the data is 16-byte aligned.  In addition,
- * we need the sentinel byte to prevent accidental pointers to the next block.
- * Because of the extra overhead, we only do this for page size and above, where
- * the overhead is minimal compared to the block size.
- *
- * So for those blocks, it looks like:
- * `|N*elemsize|padding|elem0|elem1|...|elemN-1|emptyspace|sentinelbyte|``
- *
- * where `elem0` starts 16 bytes after the first byte.
- */
-bool __setArrayAllocLength(T)(ref ArrayMetadata info, size_t newLength, bool isShared, size_t oldLength = ~0)
-{
-    return info.setUsed(newLength, oldLength, isShared);
+        return ptr[0 .. arrSize];
+    return null;
 }
