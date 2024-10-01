@@ -19,7 +19,7 @@ import cstdlib = core.stdc.stdlib : calloc, free, malloc, realloc;
 // used space. We cheat and use the bits to determine this when allocating and
 // getting the block info.
 
-private int sizeAdjustment(size_t size, uint bits) pure nothrow @nogc @safe
+/+private int sizeAdjustment(size_t size, uint bits) pure nothrow @nogc @safe
 {
     if(bits & BlkAttr.APPENDABLE)
     {
@@ -32,7 +32,7 @@ private int sizeAdjustment(size_t size, uint bits) pure nothrow @nogc @safe
     }
     // no size adjustment needed.
     return 0;
-}
+}+/
 
 // define all the extern(C) functions we need from libdmalloc
 
@@ -40,17 +40,19 @@ extern(C) nothrow {
         void onOutOfMemoryError(void* pretend_sideffect = null, string file = __FILE__, size_t line = __LINE__) @trusted nothrow @nogc;
 
         // hooks from sdc
-        void* __sd_gc_alloc_finalizer(size_t size, void *finalizer);
+        /+void* __sd_gc_alloc_finalizer(size_t size, void *finalizer);
         void* __sd_gc_alloc_finalizer_no_pointers(size_t size, void *finalizer);
         void* __sd_gc_alloc(size_t size);
-        void* __sd_gc_alloc_no_pointers(size_t size);
+        void* __sd_gc_alloc_no_pointers(size_t size);+/
+	void* __sd_gc_alloc_from_druntime(size_t size, uint flags, void* finalizer);
         void __sd_gc_init();
         void __sd_gc_collect();
         void *__sd_gc_realloc(void *ptr, size_t size);
         void *__sd_gc_free(void *ptr) @nogc;
         bool __sd_gc_fetch_alloc_info(void *ptr, void** base, size_t* size, size_t* gcPrivateData, BlkAttr* flags) @nogc;
-        size_t __sd_gc_get_array_used(void *ptr, size_t pdData) @nogc;
-        bool __sd_gc_set_array_used(void *ptr, size_t pdData, size_t newUsed, size_t existingUsed) @nogc;
+        bool __sd_gc_set_array_used(void *ptr, size_t newUsed, size_t existingUsed) @nogc;
+        size_t __sd_gc_ensure_capacity(void *ptr, size_t request, size_t existingUsed) @nogc;
+        void[] __sd_gc_get_allocation_slice(void *ptr) @nogc;
         void __sd_gc_add_roots(void[] range) @nogc;
         void __sd_gc_remove_roots(void *ptr) @nogc;
 
@@ -107,8 +109,8 @@ extern(C) void _d_register_sdc_gc()
 {
     __sd_gc_init();
 
-    /*import core.gc.registry;
-    registerGCFactory("sdc", &initialize);*/
+    import core.gc.registry;
+    registerGCFactory("sdc", &initialize);
 }
 
 alias ThreadScanFn = extern(C) void function(void *context, void *start, void *end) nothrow;
@@ -134,7 +136,7 @@ extern(C) void thread_scanAll_C(void *context, ThreadScanFn scanFn)
 
 // since all the real work is done in the SDC library, the class is just a
 // shim, and can just be initialized at compile time.
-/+private __gshared SnazzyGC instance = new SnazzyGC;
+private __gshared SnazzyGC instance = new SnazzyGC;
 
 private GC initialize()
 {
@@ -223,7 +225,8 @@ final class SnazzyGC : GC
             TYPEINFO_IN_BLOCK : cast(void*)context;
         if(ctx)
             bits |= BlkAttr.FINALIZE;
-        size += sizeAdjustment(size, bits);
+	return __sd_gc_alloc_from_druntime(size, bits, ctx);
+        /+size += sizeAdjustment(size, bits);
         if(ctx || (bits & BlkAttr.APPENDABLE))
 	{
 		if(bits & BlkAttr.NO_SCAN)
@@ -237,7 +240,7 @@ final class SnazzyGC : GC
 			return __sd_gc_alloc_no_pointers(size);
 		else
 			return __sd_gc_alloc(size);
-	}
+	}+/
     }
 
     /*
@@ -257,7 +260,7 @@ final class SnazzyGC : GC
             return BlkInfo.init;
         size_t context;
         __sd_gc_fetch_alloc_info(ptr, &blkinfo.base, &blkinfo.size, &context, cast(BlkAttr*)&blkinfo.attr);
-        blkinfo.size -= sizeAdjustment(blkinfo.size, blkinfo.attr);
+        //blkinfo.size -= sizeAdjustment(blkinfo.size, blkinfo.attr);
         return blkinfo;
     }
 
@@ -352,7 +355,7 @@ final class SnazzyGC : GC
         if (__sd_gc_fetch_alloc_info(p, &result.base, &result.size, &context, cast(BlkAttr*)&result.attr))
         {
             // determine if we need a size adjustment
-            result.size -= sizeAdjustment(result.size, result.attr);
+            //result.size -= sizeAdjustment(result.size, result.attr);
             return result;
         }
         return BlkInfo.init;
@@ -460,54 +463,20 @@ final class SnazzyGC : GC
      * Get array metadata for a specific pointer. Note that the resulting
      * metadata will point at the block start, not the pointer.
      */
-    ArrayMetadata getArrayMetadata(void *ptr) @nogc nothrow @trusted
+    void[] getArrayUsed(void *ptr, bool atomic) @nogc nothrow @trusted
     {
-        void *base;
-        size_t size;
-        size_t flags; // page descriptor
-        BlkAttr attrs;
-        if(!__sd_gc_fetch_alloc_info(ptr, &base, &size, &flags, &attrs))
-            return ArrayMetadata.init;
-
-        // If attrs is not appendable, then this has no metadata and can't be
-        // appended.
-        if(!(attrs & BlkAttr.APPENDABLE))
-            // not appendable
-            return ArrayMetadata.init;
-        size -= sizeAdjustment(size, attrs);
-        return ArrayMetadata(base, size, flags);
+	// NOTE: this does not distinguish between appendable and
+	// non-appendable blocks.
+	return __sd_gc_get_allocation_slice(ptr);
     }
 
-    /**
-     * Set the array used data size. You must use a metadata struct that you
-     * got from the same GC instance. If existingUsed is ~0, then this
-     * overrides any used value already stored. If it's any other value, the
-     * call only succeeds if the existing used value matches.
-     *
-     * The return value indicates success or failure.
-     * Generally called via the ArrayMetadata method.
-     */
-    bool setArrayUsed(ref ArrayMetadata metadata, size_t newUsed, size_t existingUsed = size_t.max, bool atomic = false) nothrow @nogc @trusted
+    bool setArrayUsed(void* ptr, size_t newUsed, size_t existingUsed = size_t.max, bool atomic = false) nothrow @nogc @trusted
     {
-        // if the size is not even, then we have the buffer byte involved
-        int addone = metadata.size & 1;
-        if(existingUsed < size_t.max)
-            existingUsed += addone;
-        return __sd_gc_set_array_used(metadata.base, metadata._gc_private_flags, newUsed + addone, existingUsed);
+        return __sd_gc_set_array_used(ptr, newUsed, existingUsed);
     }
 
-    /**
-     * get the array used data size. You must use a metadata struct that you
-     * got from the same GC instance.
-     * Generally called via the ArrayMetadata method.
-     */
-    size_t getArrayUsed(ref ArrayMetadata metadata, bool atomic = false) nothrow @nogc @trusted
+    size_t ensureArrayCapacity(void *ptr, size_t request, size_t existingUsed, bool atomic) @trusted
     {
-        // if the size is not even, then we have the buffer byte involved
-        int addone = metadata.size & 1;
-        auto result = __sd_gc_get_array_used(metadata.base, metadata._gc_private_flags);
-        // defend against wrapping.
-        if(result) result -= addone;
-        return result;
+	return __sd_gc_ensure_capacity(ptr, request, existingUsed);
     }
-}+/
+}
