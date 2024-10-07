@@ -253,37 +253,37 @@ extern(C) void _d_arrayshrinkfit(const TypeInfo ti, void[] arr) nothrow
     auto size = tinext.tsize;                  // array element size
     auto cursize = arr.length * size;
     auto isshared = typeid(ti) is typeid(TypeInfo_Shared);
-    // first, check to see if there are any elements that need destroying.
-    debug(PRINTF) printf("setting allocated size to %d\n", (arr.ptr - info.base) + cursize);
 
+    // fetch existing used size
+    auto oldArr = gc_getArrayUsed(arr.ptr, isshared);
+    if(oldArr.ptr is null)
+	// not a valid GC pointer
+	return;
+    // align the array.
+    oldArr = arr.ptr[0 .. oldArr.length - (arr.ptr - oldArr.ptr)];
+    if(oldArr.length <= cursize)
+	// invalid situation, or no change, can't shrink this.
+	return;
     // destroy structs that become unused memory when array size is shrunk
     if (typeid(tinext) is typeid(TypeInfo_Struct)) // avoid a complete dynamic type cast
     {
 	auto sti = cast(TypeInfo_Struct)cast(void*)tinext;
 	if (sti.xdtor)
 	{
-	    auto oldArr = gc_getArrayUsed(arr.ptr, isshared);
-	    if(oldArr.ptr is null)
-		// not a valid GC pointer
-		return;
-	    auto oldEnd = oldArr.ptr + oldArr.length;
-	    auto newEnd = arr.ptr + cursize;
-	    if(oldEnd > newEnd)
+	    // need to destroy the memory we are deallocating.
+	    try
 	    {
-		try
-		{
-		    finalize_array(newEnd, oldEnd - newEnd, sti);
-		}
-		catch (Exception e)
-		{
-		    import core.exception : onFinalizeError;
-		    onFinalizeError(sti, e);
-		}
+		finalize_array(arr.ptr + cursize, oldArr.length - cursize, sti);
+	    }
+	    catch (Exception e)
+	    {
+		import core.exception : onFinalizeError;
+		onFinalizeError(sti, e);
 	    }
 	}
     }
     // don't care if this fails. If it does, we aren't in a valid GC block anyway.
-    gc_setArrayUsed(arr.ptr, cursize, size_t.max, isshared);
+    gc_shrinkArrayUsed(arr.ptr[0 .. cursize], oldArr.length, isshared);
 }
 
 package bool hasPostblit(in TypeInfo ti) nothrow pure
@@ -393,7 +393,7 @@ Loverflow:
 Lcontinue:
 
     auto datasize = (*p).length * size;
-    auto curCapacity = gc_ensureArrayCapacity((*p).ptr, reqsize, datasize, isshared);
+    auto curCapacity = gc_reserveArrayCapacity((*p).ptr[0 .. datasize], reqsize, isshared);
     if(curCapacity != 0)
 	// in-place worked!
 	return curCapacity / size;
@@ -410,10 +410,13 @@ Lcontinue:
         goto Loverflow;
     // copy the data over.
     // note that malloc will have initialized the data we did not request to 0.
-    memcpy(newarr, (*p).ptr, datasize);
+    if(datasize)
+    {
+	memcpy(newarr, (*p).ptr, datasize);
 
-    // handle postblit
-    __doPostblit(newarr, datasize, tinext);
+	// handle postblit
+	__doPostblit(newarr, datasize, tinext);
+    }
 
     if (tinext.flags & 1) // type contains pointers
     {
@@ -429,12 +432,12 @@ Lcontinue:
 
     // set up the correct length. Note that because malloc automatically sets
     // the used size based on the requested size, this is needed.
-    auto setUsedResult = gc_setArrayUsed(newarr, datasize, size_t.max, isshared);
+    auto setUsedResult = gc_shrinkArrayUsed(newarr[0 .. datasize], reqsize, isshared);
     assert(setUsedResult);
 
     *p = newarr[0 .. (*p).length];
 
-    curCapacity = gc_ensureArrayCapacity(newarr, 0, datasize, isshared);
+    curCapacity = gc_reserveArrayCapacity(newarr[0 .. datasize], 0, isshared);
     assert(curCapacity);
     return curCapacity / size;
 }
@@ -872,7 +875,7 @@ do
      * If not possible, allocate new space for entire array and copy.
      */
     void* newdata = (*p).ptr;
-    if (!gc_setArrayUsed(newdata, newsize, size, isshared))
+    if (!gc_expandArrayUsed(newdata[0 .. size], newsize, isshared))
     {
 	newdata = gc_malloc(newsize, __typeAttrs(tinext) | BlkAttr.APPENDABLE, tinext);
         if (!newdata)
@@ -1000,7 +1003,7 @@ do
      * If not possible, allocate new space for entire array and copy.
      */
     void* newdata = (*p).ptr;
-    if (!gc_setArrayUsed(newdata, newsize, size, isshared))
+    if (!gc_expandArrayUsed(newdata[0 .. size], newsize, isshared))
     {
 	newdata = gc_malloc(newsize, __typeAttrs(tinext) | BlkAttr.APPENDABLE, tinext);
         if (!newdata)
@@ -1137,7 +1140,7 @@ byte[] _d_arrayappendcTX(const TypeInfo ti, return scope ref byte[] px, size_t n
     //import core.stdc.stdio;
     //printf("about to do stuff, isshared=%d, amc=%p, info.base=%p, info.size=%ld, req=%ld, p.ptr=%p, p.size=%ld, used=%ld\n", cast(int)isshared, amc, info.base, info.size, n, px.ptr, px.length, info.getUsed);
 
-    if(!gc_setArrayUsed(px.ptr, newsize, size, isshared))
+    if(!gc_expandArrayUsed(px.ptr[0 .. size], newsize, isshared))
     {
 	// could not set the size, we must reallocate.
 	auto newcap = newCapacity(newlength, sizeelem);
@@ -1146,7 +1149,7 @@ byte[] _d_arrayappendcTX(const TypeInfo ti, return scope ref byte[] px, size_t n
 	{
 	    // need to adjust the used space, as it defaults to the size of the
 	    // requested data.
-	    auto setUsedResult = gc_setArrayUsed(newArr, newsize, size_t.max, isshared);
+	    auto setUsedResult = gc_shrinkArrayUsed(newArr[0 .. newsize], newcap, isshared);
 	    assert(setUsedResult);
 	}
         memcpy(newArr, px.ptr, size);

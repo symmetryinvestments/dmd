@@ -246,6 +246,7 @@ interface GC
      */
     ulong allocatedInCurrentThread() nothrow;
 
+    // ARRAY FUNCTIONS
     /**
      * Get the current used capacity of an array block. Note that this is only
      * needed if you are about to change the array used size and need to deal
@@ -259,64 +260,58 @@ interface GC
      * Returns: Current array slice, or null if the pointer does not point to a
      *   valid appendable GC block.
      */
-    void[] getArrayUsed(void *ptr, bool atomic = false) nothrow @safe @nogc;
+    void[] getArrayUsed(void *ptr, bool atomic = false) nothrow @nogc;
 
     /**
-     * Set the used capacity of the array block. This is like a realloc, except
-     * without actually reallocating. If the requested size is smaller, and
-     * setting the size is possible, then it always succeeds, and the array
-     * block is not reallocated.
+     * Expand the array used size. Used for appending and expanding the length
+     * of the array slice. If the operation can be performed without
+     * reallocating, the function succeeds. Newly expanded data is not
+     * initialized.
      *
-     * If existingUsed is other than size_t.max, then the new used value is
-     * only set if the existing used value matches in the block. Otherwise, the
-     * used size is always attempted.
-     *
-     * If the requested size would require extending into adjacent memory, and
-     * this is allowed by the allocator, the function will succeed, and the
-     * appropriate memory is appended to the allocation.
-     *
-     * If atomic is true, then this setting is done atomically such that only
-     * one thread may succeed. This can potentially be a slow operation, and
-     * any metadata is not cached by the GC.
-     *
-     * This function will not reallocate into another block. If this fails,
-     * allocating a new block is the only mechanism.
-     *
+     * slices that do not point at expandable GC blocks cannot be affected, and
+     * this function will always return false.
      * Params:
-     *   ptr - The pointer to the beginning of the slice to process. Note that
-     *         this may be an interior pointer, and if so, the requested used
-     *         size and existing used size are adjusted accordingly.
-     *   newUsed - The requested used size, based on the pointer.
-     *   existingUsed - Must match the allocation metadata info, or be size_t.max.
-     *   atomic - The allocation is shared between threads, so make sure the
-     *            operation to set the value is atomic.
-     * Returns: true if the operation succeeds.
+     *   slice - the slice to attempt expanding in place.
+     *   newUsed - the size that should be stored as used.
+     *   atomic - if true, the array may be shared between threads, and this
+     *   operation should be done atomically.
+     * Returns: true if successful.
      */
-    bool setArrayUsed(void *ptr, size_t newUsed, size_t existingUsed = size_t.max, bool atomic = false) nothrow @safe;
+    bool expandArrayUsed(void[] slice, size_t newUsed, bool atomic = false) nothrow;
 
     /**
-     * Ensure capacity for the given array data. The GC will attempt to ensure that the capacity of the given allocation is at least as large as request.
+     * Expand the array capacity. Used for reserving space that can be used for
+     * appending. If the operation can be performed without reallocating, the
+     * function succeeds. The used size is not changed.
      *
-     * If the slice does not comprise an appendable allocation, then 0 is returned.
-     *
-     * If it is not possible to ensure the capacity given without reallocating
-     * the slice, then 0 is returned.
-     *
-     * If the request is smaller than the current capacity, then it always
-     * succeeds and returns the current capacity.
-     *
+     * slices that do not point at expandable GC blocks cannot be affected, and
+     * this function will always return false.
      * Params:
-     *   ptr - Pointer to the start of the slice. This may be an interior
-     *         pointer, and if so, request and existingUsed are adjusted
-     *         accordingly.
-     *   request - Requested capacity size.
-     *   existingUsed - The existing used size of the array slice. If
-     *         size_t.max, then the GC will not validate the slice before
-     *         attempting to ensure capacity.
-     * Returns:
-     *   0 if The requested operation cannot be performed in-place, or the
-     *   parameters do not describe an appendable allocation. Otherwise, the
-     *   capacity of the slice after the operation is performed.
+     *   slice - the slice to attempt reserving capacity for.
+     *   request - the requested size to expand to. Includes the existing data.
+     *      Passing a value less than the current array size will result in no
+     *      changes, but will return the current capacity.
+     *   atomic - if true, the array may be shared between threads, and this
+     *      operation should be done atomically.
+     * Returns: resulting capacity size, 0 if the operation could not be performed.
      */
-    size_t ensureArrayCapacity(void *ptr, size_t request, size_t existingUsed = size_t.max, bool atomic = false) nothrow @safe;
+    size_t reserveArrayCapacity(void[] slice, size_t request, bool atomic = false) nothrow @safe;
+
+    /**
+     * Shrink used space of a slice. Unlike the other array functions, the
+     * array slice passed in is the target slice, and the existing used space
+     * is passed separately. This is to discourage code that ends up with a
+     * slice to dangling valid data.
+     * If slice.ptr[0 .. existingUsed] does not point to the end of a valid GC
+     * appendable slice, then the operation fails.
+     * Params:
+     *   slice - The proposed valid slice data.
+     *   existingUsed - The amount of data in the block (starting at slice.ptr)
+     *       that is currently valid in the array. If this amount does not match
+     *       the current used size, the operation fails.
+     *   atomic - If true, the slice may be shared between threads, and the
+     *       operation should be atomic.
+     * Returns: true if successful.
+     */
+    bool shrinkArrayUsed(void[] slice, size_t existingUsed, bool atomic = false) nothrow;
 }

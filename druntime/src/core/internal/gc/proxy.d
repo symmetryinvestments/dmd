@@ -292,18 +292,23 @@ extern (C)
         }
     }
 
-    size_t gc_ensureArrayCapacity(void *ptr, size_t targetCapacity, size_t existingUsed, bool atomic) nothrow @trusted
-    {
-        return instance.ensureArrayCapacity(ptr, targetCapacity, existingUsed, atomic);
-    }
-
-    size_t gc_setArrayUsed(void *ptr, size_t newUsed, size_t existingUsed, bool atomic) nothrow @trusted
-    {
-        return instance.setArrayUsed(ptr, newUsed, existingUsed, atomic);
-    }
-
-    void[] gc_getArrayUsed(void *ptr, bool atomic) nothrow @trusted
+    void[] gc_getArrayUsed(void *ptr, bool atomic) nothrow @nogc
     {
         return instance.getArrayUsed(ptr, atomic);
+    }
+
+    bool gc_expandArrayUsed(void[] slice, size_t newUsed, bool atomic) nothrow
+    {
+        return instance.expandArrayUsed(slice, newUsed, atomic);
+    }
+
+    size_t gc_reserveArrayCapacity(void[] slice, size_t request, bool atomic) nothrow @safe
+    {
+        return instance.reserveArrayCapacity(slice, request, atomic);
+    }
+
+    bool gc_shrinkArrayUsed(void[] slice, size_t existingUsed, bool atomic) nothrow
+    {
+	return instance.shrinkArrayUsed(slice, existingUsed, atomic);
     }
 }

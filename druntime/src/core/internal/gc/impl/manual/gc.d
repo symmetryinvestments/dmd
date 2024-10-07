@@ -268,19 +268,23 @@ class ManualGC : GC
         return typeof(return).init;
     }
 
-    bool setArrayUsed(void *ptr, size_t newUsed, size_t existingUsed = ~0UL, bool atomic = false)
+    void[] getArrayUsed(void *ptr, bool atomic = false) nothrow @nogc
     {
-        return false;
+	return null;
     }
 
-    void[] getArrayUsed(void *ptr, bool atomic)
+    bool expandArrayUsed(void[] slice, size_t newUsed, bool atomic = false) nothrow
     {
-        return null;
+	return false;
     }
 
-    size_t ensureArrayCapacity(void *ptr, size_t request, size_t existingUsed = ~0UL, bool atomic = false)
+    size_t reserveArrayCapacity(void[] slice, size_t request, bool atomic = false) nothrow @safe
     {
 	return 0;
     }
 
+    bool shrinkArrayUsed(void[] slice, size_t existingUsed, bool atomic = false) nothrow
+    {
+	return false;
+    }
 }

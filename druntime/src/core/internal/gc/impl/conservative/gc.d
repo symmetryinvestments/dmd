@@ -1453,12 +1453,16 @@ class ConservativeGC : GC
 	}
     }
 
-    bool setArrayUsed(void *ptr, size_t newUsed, size_t existingUsed, bool atomic) nothrow @trusted
+    bool expandArrayUsed(void[] slice, size_t newUsed, bool atomic) nothrow
     {
+	if(newUsed < slice.length)
+	    // cannot "expand" by shrinking.
+	    return false;
+
 	// use the block cache when not atomic
 	import core.internal.gc.impl.conservative.blkcache;
-	auto bic = atomic ? null : __getBlkInfo(ptr);
-	auto info = bic ? *bic : query(ptr);
+	auto bic = atomic ? null : __getBlkInfo(slice.ptr);
+	auto info = bic ? *bic : query(slice.ptr);
 
 
 	if(!(info.attr & BlkAttr.APPENDABLE))
@@ -1470,7 +1474,7 @@ class ConservativeGC : GC
 	if(info.size < PAGESIZE)
 	{
 	    // in a bin, cannot grow into another block
-	    immutable offset = ptr - info.base;
+	    immutable offset = slice.ptr - info.base;
 	    immutable contextSize = (info.attr & BlkAttr.STRUCTFINAL) ? (void*).sizeof : 0;
 	    immutable usedStoreSize = info.size > 256 ? MEDPAD : SMALLPAD;
 	    immutable maxSize = info.size - contextSize - usedStoreSize;
@@ -1481,13 +1485,10 @@ class ConservativeGC : GC
 		return false;
 	    // find the place where the used length is stored
 	    void *lenptr = info.base + maxSize;
-	    if(existingUsed != size_t.max)
-	    {
-		existingUsed += offset;
-		if((usedStoreSize == 2 ? *(cast(ushort*)lenptr) : *(cast(ubyte*)lenptr)) != existingUsed)
-		    // user did not pass in the correct used size.
-		    return false;
-	    }
+	    auto existingUsed = slice.length + offset;
+	    if((usedStoreSize == 2 ? *(cast(ushort*)lenptr) : *(cast(ubyte*)lenptr)) != existingUsed)
+		// user did not pass in the correct used size.
+		return false;
 	    if(usedStoreSize == 2)
 		*(cast(ushort*)lenptr) = cast(ushort)newUsed;
 	    else
@@ -1499,16 +1500,14 @@ class ConservativeGC : GC
 	}
 	else
 	{
-	    immutable offset = ptr - info.base - LARGEPREFIX;
+	    immutable offset = slice.ptr - info.base - LARGEPREFIX;
 	    newUsed += offset;
 	    // validate we can set the used space.
-	    if(existingUsed != size_t.max)
-	    {
-		existingUsed += offset;
-		if(*(cast(size_t*)info.base) != existingUsed)
-		    // not extendable in place.
-		    return false;
-	    }
+	    auto existingUsed = slice.length + offset;
+	    if(*(cast(size_t*)info.base) != existingUsed)
+		// not extendable in place.
+		return false;
+
 	    // page size or greater. the used size is in the first word of the
 	    // allocation. we must leave 1 byte at the end to prevent
 	    // accidentally pointing at the next block.
@@ -1535,12 +1534,12 @@ class ConservativeGC : GC
 	}
     }
 
-    size_t ensureArrayCapacity(void *ptr, size_t request, size_t existingUsed, bool atomic) @trusted
+    size_t reserveArrayCapacity(void[] slice, size_t request, bool atomic) @trusted
     {
 	// use the block cache when not atomic
 	import core.internal.gc.impl.conservative.blkcache;
-	auto bic = atomic ? null : __getBlkInfo(ptr);
-	auto info = bic ? *bic : query(ptr);
+	auto bic = atomic ? null : __getBlkInfo(slice.ptr);
+	auto info = bic ? *bic : query(slice.ptr);
 
 
 	if(!(info.attr & BlkAttr.APPENDABLE))
@@ -1554,7 +1553,7 @@ class ConservativeGC : GC
 	if(info.size < PAGESIZE)
 	{
 	    // in a bin, cannot grow into another block
-	    offset = ptr - info.base;
+	    offset = slice.ptr - info.base;
 	    immutable contextSize = (info.attr & BlkAttr.STRUCTFINAL) ? (void*).sizeof : 0;
 	    immutable usedStoreSize = info.size > 256 ? MEDPAD : SMALLPAD;
 	    blockSize = info.size - contextSize - usedStoreSize;
@@ -1565,26 +1564,20 @@ class ConservativeGC : GC
 		return 0;
 	    // find the place where the used length is stored
 	    void *lenptr = info.base + blockSize;
-	    if(existingUsed != size_t.max)
-	    {
-		existingUsed += offset;
-		if((usedStoreSize == 2 ? *(cast(ushort*)lenptr) : *(cast(ubyte*)lenptr)) != existingUsed)
+	    auto existingUsed = slice.length + offset;
+	    if((usedStoreSize == 2 ? *(cast(ushort*)lenptr) : *(cast(ubyte*)lenptr)) != existingUsed)
 		    // user did not pass in the correct used size.
 		    return 0;
-	    }
 	}
 	else
 	{
-	    offset = ptr - info.base - LARGEPREFIX;
+	    offset = slice.ptr - info.base - LARGEPREFIX;
 	    request += offset;
 	    // validate we can set the used space.
-	    if(existingUsed != size_t.max)
-	    {
-		existingUsed += offset;
-		if(*(cast(size_t*)info.base) != existingUsed)
-		    // not extendable in place.
-		    return 0;
-	    }
+	    auto existingUsed = slice.length + offset;
+	    if(*(cast(size_t*)info.base) != existingUsed)
+		// not extendable in place.
+		return 0;
 	    // page size or greater. the used size is in the first word of the
 	    // allocation. we must leave 1 byte at the end to prevent
 	    // accidentally pointing at the next block.
@@ -1608,6 +1601,64 @@ class ConservativeGC : GC
 	if(!bic && !atomic)
 	    __insertBlkInfoCache(info, null);
 	return blockSize - offset;
+    }
+
+    bool shrinkArrayUsed(void[] slice, size_t existingUsed, bool atomic)
+    {
+	if(existingUsed < slice.length)
+	    // cannot "shrink" by growing.
+	    return false;
+
+	// use the block cache when not atomic
+	import core.internal.gc.impl.conservative.blkcache;
+	auto bic = atomic ? null : __getBlkInfo(slice.ptr);
+	auto info = bic ? *bic : query(slice.ptr);
+
+
+	if(!(info.attr & BlkAttr.APPENDABLE))
+	    // not appendable
+	    return false;
+	assert(info.base); // sanity check
+
+	// TODO: use atomic operations for reading/writing the size if atomic is true
+	if(info.size < PAGESIZE)
+	{
+	    immutable offset = slice.ptr - info.base;
+
+	    existingUsed += offset;
+	    // find the place where the used length is stored
+	    immutable contextSize = (info.attr & BlkAttr.STRUCTFINAL) ? (void*).sizeof : 0;
+	    immutable usedStoreSize = info.size > 256 ? MEDPAD : SMALLPAD;
+
+	    void *lenptr = info.base + info.size - contextSize - usedStoreSize;
+	    if((usedStoreSize == 2 ? *(cast(ushort*)lenptr) : *(cast(ubyte*)lenptr)) != existingUsed)
+		// user did not pass in the correct used size.
+		return false;
+	    auto newUsed = slice.length + offset;
+	    if(usedStoreSize == 2)
+		*(cast(ushort*)lenptr) = cast(ushort)newUsed;
+	    else
+		*(cast(ubyte*)lenptr) = cast(ubyte)newUsed;
+	    if(!bic && !atomic)
+		// cache the lookup for next time.
+		__insertBlkInfoCache(info, null);
+	    return true;
+	}
+	else
+	{
+	    immutable offset = slice.ptr - info.base - LARGEPREFIX;
+	    existingUsed += offset;
+	    // validate we can set the used space.
+	    if(*(cast(size_t*)info.base) != existingUsed)
+		// not able to shrink properly.
+		return false;
+
+	    *(cast(size_t*)info.base) = slice.length + offset;
+	    if(!bic && !atomic)
+		// cache the lookup for next time
+		__insertBlkInfoCache(info, null);
+	    return true;
+	}
     }
 }
 

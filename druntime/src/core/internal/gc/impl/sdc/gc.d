@@ -40,18 +40,16 @@ extern(C) nothrow {
         void onOutOfMemoryError(void* pretend_sideffect = null, string file = __FILE__, size_t line = __LINE__) @trusted nothrow @nogc;
 
         // hooks from sdc
-        /+void* __sd_gc_alloc_finalizer(size_t size, void *finalizer);
-        void* __sd_gc_alloc_finalizer_no_pointers(size_t size, void *finalizer);
-        void* __sd_gc_alloc(size_t size);
-        void* __sd_gc_alloc_no_pointers(size_t size);+/
 	void* __sd_gc_alloc_from_druntime(size_t size, uint flags, void* finalizer);
         void __sd_gc_init();
         void __sd_gc_collect();
         void *__sd_gc_realloc(void *ptr, size_t size);
         void *__sd_gc_free(void *ptr) @nogc;
         bool __sd_gc_fetch_alloc_info(void *ptr, void** base, size_t* size, size_t* gcPrivateData, BlkAttr* flags) @nogc;
-        bool __sd_gc_set_array_used(void *ptr, size_t newUsed, size_t existingUsed) @nogc;
-        size_t __sd_gc_ensure_capacity(void *ptr, size_t request, size_t existingUsed) @nogc;
+	size_t __sd_gc_get_array_capacity(void[] slice) @nogc;
+	bool __sd_gc_extend_array_used(void* ptr, size_t newUsed, size_t existingUsed);
+	bool __sd_gc_shrink_array_used(void* ptr, size_t newUsed, size_t existingUsed);
+	bool __sd_gc_reserve_array_capacity(void* ptr, size_t request, size_t existingUsed);
         void[] __sd_gc_get_allocation_slice(void *ptr) @nogc;
         void __sd_gc_add_roots(void[] range) @nogc;
         void __sd_gc_remove_roots(void *ptr) @nogc;
@@ -149,7 +147,8 @@ final class SnazzyGC : GC
 {
     void enable()
     {
-        // TODO: add once there is a hook
+	// TODO: implement when hook works
+	//__sd_gc_activate(true);
     }
 
     /**
@@ -157,7 +156,8 @@ final class SnazzyGC : GC
      */
     void disable()
     {
-        // TODO: add once there is a hook
+	// TODO: implement when hook works
+	//__sd_gc_activate(false);
     }
 
     /**
@@ -219,8 +219,6 @@ final class SnazzyGC : GC
     {
         if(!size)
             return null;
-        // TODO, NO_SCAN is not supported, all blocks are scanned, but sdc
-        // does support non-pointer allocations, just not through the C api.
         void* ctx = (context is null && (bits & BlkAttr.FINALIZE)) ?
             TYPEINFO_IN_BLOCK : cast(void*)context;
         if(ctx)
@@ -463,20 +461,26 @@ final class SnazzyGC : GC
      * Get array metadata for a specific pointer. Note that the resulting
      * metadata will point at the block start, not the pointer.
      */
-    void[] getArrayUsed(void *ptr, bool atomic) @nogc nothrow @trusted
+    void[] getArrayUsed(void *ptr, bool atomic) @nogc nothrow
     {
-	// NOTE: this does not distinguish between appendable and
-	// non-appendable blocks.
 	return __sd_gc_get_allocation_slice(ptr);
     }
 
-    bool setArrayUsed(void* ptr, size_t newUsed, size_t existingUsed = size_t.max, bool atomic = false) nothrow @nogc @trusted
+    bool expandArrayUsed(void[] slice, size_t newUsed, bool atomic = false) nothrow
     {
-        return __sd_gc_set_array_used(ptr, newUsed, existingUsed);
+	return __sd_gc_extend_array_used(slice.ptr, newUsed, slice.length);
     }
 
-    size_t ensureArrayCapacity(void *ptr, size_t request, size_t existingUsed, bool atomic) @trusted
+    size_t reserveArrayCapacity(void[] slice, size_t request, bool atomic = false) nothrow @trusted
     {
-	return __sd_gc_ensure_capacity(ptr, request, existingUsed);
+	if(request > slice.length)
+	    if(!__sd_gc_reserve_array_capacity(slice.ptr, request, slice.length))
+		return 0;
+	return __sd_gc_get_array_capacity(slice);
+    }
+
+    bool shrinkArrayUsed(void[] slice, size_t existingUsed, bool atomic = false) nothrow
+    {
+	return __sd_gc_shrink_array_used(slice.ptr, slice.length, existingUsed);
     }
 }
