@@ -403,12 +403,12 @@ $(DRUNTIMESO) $(DRUNTIMESOLIB) dll: DFLAGS+=-version=Shared $(SHAREDFLAGS)
 dll: $(DRUNTIMESOLIB)
 dll_so: $(DRUNTIMESO)
 
-$(DRUNTIMESO): $(OBJS) $(SRCS) $(DMD)
-	$(DMD) -shared -debuglib= -defaultlib= -of$(DRUNTIMESO) $(DFLAGS) $(SRCS) $(OBJS) $(LINKDL) $(SOLIBS)
+$(DRUNTIMESO): $(OBJS) $(SRCS) $(DMD) $(SDCALLOC)
+	$(DMD) -shared -debuglib= -defaultlib= -of$(DRUNTIMESO) $(DFLAGS) $(SRCS) $(OBJS) $(SDCALLOC) $(LINKDL) $(SOLIBS)
 
-$(DRUNTIMESOLIB): $(OBJS) $(SRCS) $(DMD)
+$(DRUNTIMESOLIB): $(OBJS) $(SRCS) $(DMD) $(SDCALLOC)
 	$(DMD) -c $(if $(findstring $(OS),windows),,-fPIC) -of$(DRUNTIMESOOBJ) $(DFLAGS) $(SRCS)
-	$(DMD) -conf= -lib -of$(DRUNTIMESOLIB) $(DRUNTIMESOOBJ) $(OBJS)
+	$(DMD) -conf= -lib -of$(DRUNTIMESOLIB) $(SDCALLOC) $(DRUNTIMESOOBJ) $(OBJS)
 
 ################### Library generation #########################
 
@@ -454,8 +454,8 @@ $(addprefix $(ROOT)/unittest/,$(DISABLED_TESTS)) :
 
 ifeq (,$(SHARED))
 
-$(ROOT)/unittest/test_runner$(DOTEXE): $(OBJS) $(SRCS) src/test_runner.d $(DMD)
-	$(DMD) $(UDFLAGS) $(UTFLAGS) -of$@ src/test_runner.d $(SRCS) $(OBJS) -defaultlib= $(if $(findstring $(OS),windows),user32.lib,-L-lpthread -L-lm)
+$(ROOT)/unittest/test_runner$(DOTEXE): $(OBJS) $(SRCS) src/test_runner.d $(DMD) $(SDCALLOC)
+	$(DMD) $(UDFLAGS) $(UTFLAGS) -of$@ src/test_runner.d $(SRCS) $(OBJS) $(SDCALLOC) -defaultlib= $(if $(findstring $(OS),windows),user32.lib,-L-lpthread -L-lm)
 
 else
 
@@ -463,7 +463,7 @@ UT_DRUNTIME:=$(ROOT)/unittest/libdruntime-ut$(DOTDLL)
 UT_DRUNTIMELIB:=$(ROOT)/unittest/libdruntime-ut$(if $(findstring $(OS),windows),$(DOTLIB),$(DOTDLL))
 
 $(UT_DRUNTIME): UDFLAGS+=-version=Shared $(SHAREDFLAGS)
-$(UT_DRUNTIME): $(OBJS) $(SRCS) $(DMD)
+$(UT_DRUNTIME): $(OBJS) $(SRCS) $(DMD) $(SDCALLOC)
 	$(DMD) $(UDFLAGS) -shared $(UTFLAGS) -of$@ $(SRCS) $(OBJS) $(LINKDL) $(SDCALLOC) -defaultlib= $(if $(findstring $(OS),windows),user32.lib -L/IMPLIB:$(UT_DRUNTIMELIB),) $(SOLIBS)
 
 $(ROOT)/unittest/test_runner$(DOTEXE): $(UT_DRUNTIME) src/test_runner.d $(DMD)
