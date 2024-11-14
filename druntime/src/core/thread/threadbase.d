@@ -985,6 +985,10 @@ private alias resume = externDFunc!("core.thread.osthread.resume", void function
  * Throws:
  *  ThreadError if the resume operation fails for a running thread.
  */
+extern (C) void thread_postRestartTheWorld() nothrow {
+    ThreadBase.slock.unlock_nothrow();
+}
+
 extern (C) void thread_resumeAll() nothrow
 in
 {
@@ -1000,7 +1004,7 @@ do
         return;
     }
 
-    scope(exit) ThreadBase.slock.unlock_nothrow();
+    scope(exit) thread_postRestartTheWorld();
     {
         if (--suspendDepth > 0)
             return;

@@ -349,7 +349,7 @@ T[] _d_newarrayU(T)(size_t length, bool isShared=false) @trusted
 {
     import core.exception : onOutOfMemoryError;
     import core.internal.traits : Unqual;
-    import core.internal.array.utils : __arrayStart, __setArrayAllocLength, __arrayAlloc;
+    import core.internal.array.utils : __arrayAlloc;
 
     alias UnqT = Unqual!T;
 
@@ -396,15 +396,11 @@ Loverflow:
 
 Lcontinue:
     auto info = __arrayAlloc!UnqT(arraySize);
-    if (!info.base)
+    if (!info.ptr)
         goto Loverflow;
-    debug(PRINTF) printf("p = %p\n", info.base);
+    debug(PRINTF) printf("p = %p\n", info.ptr);
 
-    auto arrstart = __arrayStart(info);
-
-    __setArrayAllocLength!UnqT(info, arraySize, isShared);
-
-    return (cast(T*) arrstart)[0 .. length];
+    return (cast(T*) info.ptr)[0 .. length];
 }
 
 /// ditto
@@ -522,7 +518,7 @@ Tarr _d_newarraymTX(Tarr : U[], T, U)(size_t[] dims, bool isShared=false) @trust
 
     void[] __allocateInnerArray(size_t[] dims)
     {
-        import core.internal.array.utils : __arrayStart, __setArrayAllocLength, __arrayAlloc;
+        import core.internal.array.utils : __arrayAlloc;
 
         auto dim = dims[0];
 
@@ -536,8 +532,7 @@ Tarr _d_newarraymTX(Tarr : U[], T, U)(size_t[] dims, bool isShared=false) @trust
         auto allocSize = (void[]).sizeof * dim;
         // the array-of-arrays holds pointers! Don't use UnqT here!
         auto info = __arrayAlloc!(void[])(allocSize);
-        __setArrayAllocLength!(void[])(info, allocSize, isShared);
-        auto p = __arrayStart(info)[0 .. dim];
+        auto p = info.ptr[0 .. dim];
 
         foreach (i; 0..dim)
         {

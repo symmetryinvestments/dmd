@@ -2827,19 +2827,10 @@ T* _d_newitemT(T)() @trusted
     auto flags = !hasIndirections!T ? GC.BlkAttr.NO_SCAN : GC.BlkAttr.NONE;
     immutable tiSize = TypeInfoSize!T;
     immutable itemSize = T.sizeof;
-    immutable totalSize = itemSize + tiSize;
     if (tiSize)
         flags |= GC.BlkAttr.STRUCTFINAL | GC.BlkAttr.FINALIZE;
 
-    auto blkInfo = GC.qalloc(totalSize, flags, null);
-    auto p = blkInfo.base;
-
-    if (tiSize)
-    {
-        // The GC might not have cleared the padding area in the block.
-        *cast(TypeInfo*) (p + (itemSize & ~(size_t.sizeof - 1))) = null;
-        *cast(TypeInfo*) (p + blkInfo.size - tiSize) = cast() typeid(T);
-    }
+    auto p = GC.malloc(itemSize, flags, typeid(T));
 
     emplaceInitializer(*(cast(T*) p));
 

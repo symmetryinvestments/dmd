@@ -21,6 +21,11 @@ extern (C) void register_default_gcs()
  */
 class MallocGC : GC
 {
+    BlkInfo qalloc(size_t size, uint bits, const scope TypeInfo ti) nothrow
+    {
+        return BlkInfo(GC.malloc(size, bits, ti), size);
+    }
+
 nothrow @nogc:
     static GC initialize()
     {
@@ -79,27 +84,22 @@ nothrow @nogc:
         return mask;
     }
 
-    void* malloc(size_t size, uint bits, const TypeInfo ti) nothrow
+    void* malloc(size_t size, uint bits, const void* context, immutable size_t *ptrbitmap) nothrow
     {
         return sentinelAdd(.malloc(size + sentinelSize), size);
     }
 
-    BlkInfo qalloc(size_t size, uint bits, const scope TypeInfo ti) nothrow
-    {
-        return BlkInfo(malloc(size, bits, ti), size);
-    }
-
-    void* calloc(size_t size, uint bits, const TypeInfo ti) nothrow
+    void* calloc(size_t size, uint bits, const void *context, immutable size_t *ptrbitmap) nothrow
     {
         return sentinelAdd(.calloc(1, size + sentinelSize), size);
     }
 
-    void* realloc(void* p, size_t size, uint bits, const TypeInfo ti) nothrow
+    void* realloc(void* p, size_t size, uint bits, immutable size_t *ptrbitmap) nothrow
     {
         return sentinelAdd(.realloc(p - sentinelSize, size + sentinelSize), size);
     }
 
-    size_t extend(void* p, size_t minsize, size_t maxsize, const TypeInfo ti) nothrow
+    size_t extend(void* p, size_t minsize, size_t maxsize) nothrow
     {
         return 0;
     }
@@ -126,7 +126,7 @@ nothrow @nogc:
 
     BlkInfo query(void* p) nothrow
     {
-        return p ? BlkInfo(p, sentinelGet(p)) : BlkInfo.init;
+        return p ? BlkInfo(p, sentinelGetBlockSize(p)) : BlkInfo.init;
     }
 
     core.memory.GC.Stats stats() nothrow
@@ -179,20 +179,59 @@ nothrow @nogc:
         return stats().allocatedInCurrentThread;
     }
 
+    ArrayMetadata getArrayMetadata(void *ptr) @nogc nothrow @trusted
+    {
+        return ptr ? ArrayMetadata(ptr, sentinelGetBlockSize(ptr)) : ArrayMetadata.init;
+    }
+
+    bool setArrayUsed(ref ArrayMetadata metadata, size_t newUsed, size_t existingUsed = ~0UL, bool atomic = false) nothrow @nogc @trusted
+    {
+        if(metadata.base)
+        {
+            if(newUsed > metadata.size)
+                return false;
+
+            size_t *usedptr = sentinelGetUsedSize(metadata.base);
+            if(existingUsed == -1 || *usedptr == existingUsed)
+            {
+                *usedptr = newUsed;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * get the array used data size. You must use a metadata struct that you
+     * got from the same GC instance.
+     * Generally called via the ArrayMetadata method.
+     */
+    size_t getArrayUsed(ref ArrayMetadata metadata, bool atomic = false) nothrow @nogc @trusted
+    {
+        return metadata.base ? *sentinelGetUsedSize(metadata.base) : 0;
+    }
+
 private:
     // doesn't care for alignment
-    static void* sentinelAdd(void* p, size_t value)
+    static void* sentinelAdd(void* p, size_t value) nothrow @nogc
     {
-        *cast(size_t*) p = value;
+        auto metadata = cast(size_t*)p;
+        metadata[0] = value;
+        metadata[1] = value;
         return p + sentinelSize;
     }
 
-    static size_t sentinelGet(void* p)
+    static size_t sentinelGetBlockSize(void* p) nothrow @nogc
     {
         return *cast(size_t*)(p - sentinelSize);
     }
 
-    enum sentinelSize = size_t.sizeof;
+    static size_t* sentinelGetUsedSize(void* p)
+    {
+        return cast(size_t*)(p - sentinelSize) + 1;
+    }
+
+    enum sentinelSize = size_t.sizeof * 2; // block size and used data
 }
 
 void main()

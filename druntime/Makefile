@@ -53,6 +53,8 @@ endif
 DMD=../generated/$(OS)/$(BUILD)/$(MODEL)/dmd$(DOTEXE)
 INSTALL_DIR=../../install
 
+SDCALLOC?=../../sdc/lib/libdmdalloc.a
+
 # directory where the html files for the documentation are placed
 DOC_OUTPUT_DIR=doc
 IMPDIR=import
@@ -410,8 +412,8 @@ $(DRUNTIMESOLIB): $(OBJS) $(SRCS) $(DMD)
 
 ################### Library generation #########################
 
-$(DRUNTIME): $(OBJS) $(SRCS) $(DMD)
-	$(DMD) -lib -of$(DRUNTIME) -Xfdruntime.json $(DFLAGS) $(SRCS) $(OBJS)
+$(DRUNTIME): $(OBJS) $(SRCS) $(DMD) $(SDCALLOC)
+	$(DMD) -lib -of$(DRUNTIME) $(SDCALLOC) -Xfdruntime.json $(DFLAGS) $(SRCS) $(OBJS)
 
 lib: $(DRUNTIME)
 
@@ -462,7 +464,7 @@ UT_DRUNTIMELIB:=$(ROOT)/unittest/libdruntime-ut$(if $(findstring $(OS),windows),
 
 $(UT_DRUNTIME): UDFLAGS+=-version=Shared $(SHAREDFLAGS)
 $(UT_DRUNTIME): $(OBJS) $(SRCS) $(DMD)
-	$(DMD) $(UDFLAGS) -shared $(UTFLAGS) -of$@ $(SRCS) $(OBJS) $(LINKDL) -defaultlib= $(if $(findstring $(OS),windows),user32.lib -L/IMPLIB:$(UT_DRUNTIMELIB),) $(SOLIBS)
+	$(DMD) $(UDFLAGS) -shared $(UTFLAGS) -of$@ $(SRCS) $(OBJS) $(LINKDL) $(SDCALLOC) -defaultlib= $(if $(findstring $(OS),windows),user32.lib -L/IMPLIB:$(UT_DRUNTIMELIB),) $(SOLIBS)
 
 $(ROOT)/unittest/test_runner$(DOTEXE): $(UT_DRUNTIME) src/test_runner.d $(DMD)
 	$(DMD) $(UDFLAGS) -of$@ src/test_runner.d -L$(UT_DRUNTIMELIB) -defaultlib= $(if $(findstring $(OS),windows),-dllimport=defaultLibsOnly user32.lib,-L-lpthread -L-lm)

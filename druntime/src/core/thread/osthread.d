@@ -1793,6 +1793,10 @@ private extern (D) bool suspend( Thread t ) nothrow @nogc
  * Throws:
  *  ThreadError if the suspend operation fails for a running thread.
  */
+extern (C) void thread_preStopTheWorld() nothrow {
+    Thread.slock.lock_nothrow();
+}
+
 extern (C) void thread_suspendAll() nothrow
 {
     // NOTE: We've got an odd chicken & egg problem here, because while the GC
@@ -1816,7 +1820,7 @@ extern (C) void thread_suspendAll() nothrow
         return;
     }
 
-    Thread.slock.lock_nothrow();
+    thread_preStopTheWorld();
     {
         if ( ++suspendDepth > 1 )
             return;
@@ -2278,6 +2282,35 @@ else version (Posix)
         __gshared sem_t suspendCount;
 
 
+        extern (C) bool thread_preSuspend( void* sp ) nothrow {
+            // NOTE: Since registers are being pushed and popped from the
+            //       stack, any other stack data used by this function should
+            //       be gone before the stack cleanup code is called below.
+            Thread obj = Thread.getThis();
+            if (obj is null)
+		    return false;
+
+            if ( obj && !obj.m_lock )
+            {
+                obj.m_curr.tstack = sp;
+            }
+
+	    return true;
+        }
+
+        extern (C) bool thread_postSuspend() nothrow {
+            Thread obj = Thread.getThis();
+	    if(obj is null)
+		    return false;
+
+            if ( obj && !obj.m_lock )
+            {
+                obj.m_curr.tstack = obj.m_curr.bstack;
+            }
+	    
+	    return true;
+        }
+
         extern (C) void thread_suspendHandler( int sig ) nothrow
         in
         {
@@ -2287,16 +2320,12 @@ else version (Posix)
         {
             void op(void* sp) nothrow
             {
-                // NOTE: Since registers are being pushed and popped from the
-                //       stack, any other stack data used by this function should
-                //       be gone before the stack cleanup code is called below.
-                Thread obj = Thread.getThis();
-                assert(obj !is null);
-
-                if ( !obj.m_lock )
-                {
-                    obj.m_curr.tstack = getStackTop();
-                }
+		    bool supported = thread_preSuspend(getStackTop);
+		    assert(supported, "Tried to suspend a detached thread!");
+                scope(exit)  {
+			supported = thread_postSuspend();
+		    assert(supported, "Tried to suspend a detached thread!");
+		}
 
                 sigset_t    sigres = void;
                 int         status;
@@ -2311,11 +2340,6 @@ else version (Posix)
                 assert( status == 0 );
 
                 sigsuspend( &sigres );
-
-                if ( !obj.m_lock )
-                {
-                    obj.m_curr.tstack = obj.m_curr.bstack;
-                }
             }
             callWithStackShell(&op);
         }

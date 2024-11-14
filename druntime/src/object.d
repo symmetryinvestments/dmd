@@ -4042,7 +4042,12 @@ auto ref inout(T[]) assumeSafeAppend(T)(auto ref inout(T[]) arr) nothrow @system
     assert(newcap == arr.capacity);
     auto ptr = arr.ptr;
     foreach (i; 0..2000)
+    {
+        import core.stdc.stdio;
         arr ~= i;
+        if(arr.ptr !is ptr)
+            printf("oops! %d\n", i);
+    }
     assert(ptr == arr.ptr);
     arr = arr[0..1];
     arr.assumeSafeAppend();

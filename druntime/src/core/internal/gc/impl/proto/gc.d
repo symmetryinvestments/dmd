@@ -15,7 +15,9 @@ private
     extern (C) void gc_init_nothrow() nothrow @nogc;
     extern (C) void gc_term();
 
-    extern (C) void gc_enable() nothrow;
+    // use gc proxy directly
+    extern(C) GC gc_getProxy() nothrow;
+    /*extern (C) void gc_enable() nothrow;
     extern (C) void gc_disable() nothrow;
 
     extern (C) void*    gc_malloc( size_t sz, uint ba = 0, const scope TypeInfo = null ) pure nothrow;
@@ -25,7 +27,7 @@ private
     extern (C) size_t   gc_reserve( size_t sz ) nothrow;
 
     extern (C) void gc_addRange(const void* p, size_t sz, const scope TypeInfo ti = null ) nothrow @nogc;
-    extern (C) void gc_addRoot(const void* p ) nothrow @nogc;
+    extern (C) void gc_addRoot(const void* p ) nothrow @nogc;*/
 }
 
 class ProtoGC : GC
@@ -42,13 +44,13 @@ class ProtoGC : GC
         foreach (ref r; ranges)
         {
             // Range(p, p + sz, cast() ti)
-            gc_addRange(r.pbot, r.ptop - r.pbot, r.ti);
+            .gc_getProxy.addRange(r.pbot, r.ptop - r.pbot, r.ti);
         }
 
         // Transfer all roots
         foreach (ref r; roots)
         {
-            gc_addRoot(r.proot);
+            .gc_getProxy.addRoot(r.proot);
         }
     }
 
@@ -63,13 +65,13 @@ class ProtoGC : GC
     void enable()
     {
         .gc_init_nothrow();
-        .gc_enable();
+        .gc_getProxy().enable();
     }
 
     void disable()
     {
         .gc_init_nothrow();
-        .gc_disable();
+        .gc_getProxy().disable();
     }
 
     void collect() nothrow
@@ -95,31 +97,31 @@ class ProtoGC : GC
         return 0;
     }
 
-    void* malloc(size_t size, uint bits, const scope TypeInfo ti) nothrow
+    void* malloc(size_t size, uint bits, const void *context, immutable size_t *pointerBitmap) nothrow
     {
         .gc_init_nothrow();
-        return .gc_malloc(size, bits, ti);
+        return .gc_getProxy().malloc(size, bits, context, pointerBitmap);
     }
 
     BlkInfo qalloc(size_t size, uint bits, const scope TypeInfo ti) nothrow
     {
         .gc_init_nothrow();
-        return .gc_qalloc(size, bits, ti);
+        return .gc_getProxy().qalloc(size, bits, ti);
     }
 
-    void* calloc(size_t size, uint bits, const scope TypeInfo ti) nothrow
+    void* calloc(size_t size, uint bits, const void *context, immutable size_t *pointerBitmap) nothrow
     {
         .gc_init_nothrow();
-        return .gc_calloc(size, bits, ti);
+        return .gc_getProxy().calloc(size, bits, context, pointerBitmap);
     }
 
-    void* realloc(void* p, size_t size, uint bits, const scope TypeInfo ti) nothrow
+    void* realloc(void* p, size_t size, uint bits, immutable size_t *pointerBitmap) nothrow
     {
         .gc_init_nothrow();
-        return .gc_realloc(p, size, bits, ti);
+        return .gc_getProxy().realloc(p, size, bits, pointerBitmap);
     }
 
-    size_t extend(void* p, size_t minsize, size_t maxsize, const scope TypeInfo ti) nothrow
+    size_t extend(void* p, size_t minsize, size_t maxsize) nothrow
     {
         return 0;
     }
@@ -127,7 +129,7 @@ class ProtoGC : GC
     size_t reserve(size_t size) nothrow
     {
         .gc_init_nothrow();
-        return .gc_reserve(size);
+        return .gc_getProxy().reserve(size);
     }
 
     void free(void* p) nothrow @nogc
@@ -240,5 +242,25 @@ class ProtoGC : GC
     ulong allocatedInCurrentThread() nothrow
     {
         return stats().allocatedInCurrentThread;
+    }
+
+    void[] getArrayUsed(void *ptr, bool atomic = false) nothrow @nogc
+    {
+	return null;
+    }
+
+    bool expandArrayUsed(void[] slice, size_t newUsed, bool atomic = false) nothrow
+    {
+	return false;
+    }
+
+    size_t reserveArrayCapacity(void[] slice, size_t request, bool atomic = false) nothrow @safe
+    {
+	return 0;
+    }
+
+    bool shrinkArrayUsed(void[] slice, size_t existingUsed, bool atomic = false) nothrow
+    {
+	return false;
     }
 }

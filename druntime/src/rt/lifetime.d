@@ -13,8 +13,12 @@
 module rt.lifetime;
 
 import core.attribute : weak;
-import core.internal.array.utils : __arrayStart, __arrayClearPad;
 import core.memory;
+
+import core.internal.gc.proxy;
+
+extern(C) void *gc_malloc(size_t sz, uint ba = 0, const scope TypeInfo ti = null) nothrow pure;
+
 debug(PRINTF) import core.stdc.stdio;
 static import rt.tlsgc;
 
@@ -28,7 +32,7 @@ private
 
     extern (C) void _d_monitordelete(Object h, bool det);
 
-    enum : size_t
+    /*enum : size_t
     {
         PAGESIZE = 4096,
         BIGLENGTHMASK = ~(PAGESIZE - 1),
@@ -38,6 +42,10 @@ private
         LARGEPAD = LARGEPREFIX + 1,
         MAXSMALLSIZE = 256-SMALLPAD,
         MAXMEDSIZE = (PAGESIZE / 2) - MEDPAD
+    }*/
+    enum : size_t {
+        PAGESIZE = 4096,
+        MINEXTENDSIZE = (PAGESIZE / 2) + 1
     }
 }
 
@@ -211,435 +219,19 @@ inout(TypeInfo) unqualify(return scope inout(TypeInfo) cti) pure nothrow @nogc
     return ti;
 }
 
-// size used to store the TypeInfo at the end of an allocation for structs that have a destructor
-size_t structTypeInfoSize(const TypeInfo ti) pure nothrow @nogc
-{
-    if (ti && typeid(ti) is typeid(TypeInfo_Struct)) // avoid a complete dynamic type cast
-    {
-        auto sti = cast(TypeInfo_Struct)cast(void*)ti;
-        if (sti.xdtor)
-            return size_t.sizeof;
-    }
-    return 0;
-}
-
-/** dummy class used to lock for shared array appending */
-private class ArrayAllocLengthLock
-{}
-
 /**
-  Set the allocated length of the array block.  This is called
-  any time an array is appended to or its length is set.
-
-  The allocated block looks like this for blocks < PAGESIZE:
-
-  |elem0|elem1|elem2|...|elemN-1|emptyspace|N*elemsize|
-
-
-  The size of the allocated length at the end depends on the block size:
-
-  a block of 16 to 256 bytes has an 8-bit length.
-
-  a block with 512 to pagesize/2 bytes has a 16-bit length.
-
-  For blocks >= pagesize, the length is a size_t and is at the beginning of the
-  block.  The reason we have to do this is because the block can extend into
-  more pages, so we cannot trust the block length if it sits at the end of the
-  block, because it might have just been extended.  If we can prove in the
-  future that the block is unshared, we may be able to change this, but I'm not
-  sure it's important.
-
-  In order to do put the length at the front, we have to provide 16 bytes
-  buffer space in case the block has to be aligned properly.  In x86, certain
-  SSE instructions will only work if the data is 16-byte aligned.  In addition,
-  we need the sentinel byte to prevent accidental pointers to the next block.
-  Because of the extra overhead, we only do this for page size and above, where
-  the overhead is minimal compared to the block size.
-
-  So for those blocks, it looks like:
-
-  |N*elemsize|padding|elem0|elem1|...|elemN-1|emptyspace|sentinelbyte|
-
-  where elem0 starts 16 bytes after the first byte.
+  get the attributes that should be used when allocating a block containing a type
   */
-bool __setArrayAllocLength(ref BlkInfo info, size_t newlength, bool isshared, const TypeInfo tinext, size_t oldlength = ~0) pure nothrow
+private uint __typeAttrs(const scope TypeInfo ti) pure nothrow
 {
-    import core.atomic;
-
-    size_t typeInfoSize = structTypeInfoSize(tinext);
-
-    if (info.size <= 256)
+    uint attr = (!(ti.flags & 1) ? BlkAttr.NO_SCAN : 0) | BlkAttr.APPENDABLE;
+    if (typeid(ti) is typeid(TypeInfo_Struct))
     {
-        import core.checkedint;
-
-        bool overflow;
-        auto newlength_padded = addu(newlength,
-                                     addu(SMALLPAD, typeInfoSize, overflow),
-                                     overflow);
-
-        if (newlength_padded > info.size || overflow)
-            // new size does not fit inside block
-            return false;
-
-        auto length = cast(ubyte *)(info.base + info.size - typeInfoSize - SMALLPAD);
-        if (oldlength != ~0)
-        {
-            if (isshared)
-            {
-                return cas(cast(shared)length, cast(ubyte)oldlength, cast(ubyte)newlength);
-            }
-            else
-            {
-                if (*length == cast(ubyte)oldlength)
-                    *length = cast(ubyte)newlength;
-                else
-                    return false;
-            }
-        }
-        else
-        {
-            // setting the initial length, no cas needed
-            *length = cast(ubyte)newlength;
-        }
-        if (typeInfoSize)
-        {
-            auto typeInfo = cast(TypeInfo*)(info.base + info.size - size_t.sizeof);
-            *typeInfo = cast() tinext;
-        }
+	auto sti = cast(TypeInfo_Struct)cast(void*)ti;
+	if(sti.xdtor)
+	    attr |= BlkAttr.STRUCTFINAL | BlkAttr.FINALIZE;
     }
-    else if (info.size < PAGESIZE)
-    {
-        if (newlength + MEDPAD + typeInfoSize > info.size)
-            // new size does not fit inside block
-            return false;
-        auto length = cast(ushort *)(info.base + info.size - typeInfoSize - MEDPAD);
-        if (oldlength != ~0)
-        {
-            if (isshared)
-            {
-                return cas(cast(shared)length, cast(ushort)oldlength, cast(ushort)newlength);
-            }
-            else
-            {
-                if (*length == oldlength)
-                    *length = cast(ushort)newlength;
-                else
-                    return false;
-            }
-        }
-        else
-        {
-            // setting the initial length, no cas needed
-            *length = cast(ushort)newlength;
-        }
-        if (typeInfoSize)
-        {
-            auto typeInfo = cast(TypeInfo*)(info.base + info.size - size_t.sizeof);
-            *typeInfo = cast() tinext;
-        }
-    }
-    else
-    {
-        if (newlength + LARGEPAD > info.size)
-            // new size does not fit inside block
-            return false;
-        auto length = cast(size_t *)(info.base);
-        if (oldlength != ~0)
-        {
-            if (isshared)
-            {
-                return cas(cast(shared)length, cast(size_t)oldlength, cast(size_t)newlength);
-            }
-            else
-            {
-                if (*length == oldlength)
-                    *length = newlength;
-                else
-                    return false;
-            }
-        }
-        else
-        {
-            // setting the initial length, no cas needed
-            *length = newlength;
-        }
-        if (typeInfoSize)
-        {
-            auto typeInfo = cast(TypeInfo*)(info.base + size_t.sizeof);
-            *typeInfo = cast()tinext;
-        }
-    }
-    return true; // resize succeeded
-}
-
-/**
-  get the allocation size of the array for the given block (without padding or type info)
-  */
-private size_t __arrayAllocLength(ref BlkInfo info, const TypeInfo tinext) pure nothrow
-{
-    if (info.size <= 256)
-        return *cast(ubyte *)(info.base + info.size - structTypeInfoSize(tinext) - SMALLPAD);
-
-    if (info.size < PAGESIZE)
-        return *cast(ushort *)(info.base + info.size - structTypeInfoSize(tinext) - MEDPAD);
-
-    return *cast(size_t *)(info.base);
-}
-
-/**
-  get the padding required to allocate size bytes.  Note that the padding is
-  NOT included in the passed in size.  Therefore, do NOT call this function
-  with the size of an allocated block.
-  */
-private size_t __arrayPad(size_t size, const TypeInfo tinext) nothrow pure @trusted
-{
-    return size > MAXMEDSIZE ? LARGEPAD : ((size > MAXSMALLSIZE ? MEDPAD : SMALLPAD) + structTypeInfoSize(tinext));
-}
-
-/**
-  allocate an array memory block by applying the proper padding and
-  assigning block attributes if not inherited from the existing block
-  */
-private BlkInfo __arrayAlloc(size_t arrsize, const scope TypeInfo ti, const TypeInfo tinext) nothrow pure
-{
-    import core.checkedint;
-
-    size_t typeInfoSize = structTypeInfoSize(tinext);
-    size_t padsize = arrsize > MAXMEDSIZE ? LARGEPAD : ((arrsize > MAXSMALLSIZE ? MEDPAD : SMALLPAD) + typeInfoSize);
-
-    bool overflow;
-    auto padded_size = addu(arrsize, padsize, overflow);
-
-    if (overflow)
-        return BlkInfo();
-
-    uint attr = (!(tinext.flags & 1) ? BlkAttr.NO_SCAN : 0) | BlkAttr.APPENDABLE;
-    if (typeInfoSize)
-        attr |= BlkAttr.STRUCTFINAL | BlkAttr.FINALIZE;
-
-    auto bi = GC.qalloc(padded_size, attr, tinext);
-    __arrayClearPad(bi, arrsize, padsize);
-    return bi;
-}
-
-private BlkInfo __arrayAlloc(size_t arrsize, ref BlkInfo info, const scope TypeInfo ti, const TypeInfo tinext)
-{
-    import core.checkedint;
-
-    if (!info.base)
-        return __arrayAlloc(arrsize, ti, tinext);
-
-    immutable padsize = __arrayPad(arrsize, tinext);
-    bool overflow;
-    auto padded_size = addu(arrsize, padsize, overflow);
-    if (overflow)
-    {
-        return BlkInfo();
-    }
-
-    auto bi = GC.qalloc(padded_size, info.attr, tinext);
-    __arrayClearPad(bi, arrsize, padsize);
-    return bi;
-}
-
-/**
-  cache for the lookup of the block info
-  */
-private enum N_CACHE_BLOCKS=8;
-
-// note this is TLS, so no need to sync.
-BlkInfo *__blkcache_storage;
-
-static if (N_CACHE_BLOCKS==1)
-{
-    version=single_cache;
-}
-else
-{
-    //version=simple_cache; // uncomment to test simple cache strategy
-    //version=random_cache; // uncomment to test random cache strategy
-
-    // ensure N_CACHE_BLOCKS is power of 2.
-    static assert(!((N_CACHE_BLOCKS - 1) & N_CACHE_BLOCKS));
-
-    version (random_cache)
-    {
-        int __nextRndNum = 0;
-    }
-    int __nextBlkIdx;
-}
-
-@property BlkInfo *__blkcache() nothrow
-{
-    if (!__blkcache_storage)
-    {
-        import core.stdc.stdlib;
-        import core.stdc.string;
-        // allocate the block cache for the first time
-        immutable size = BlkInfo.sizeof * N_CACHE_BLOCKS;
-        __blkcache_storage = cast(BlkInfo *)malloc(size);
-        memset(__blkcache_storage, 0, size);
-    }
-    return __blkcache_storage;
-}
-
-// called when thread is exiting.
-static ~this()
-{
-    // free the blkcache
-    if (__blkcache_storage)
-    {
-        import core.stdc.stdlib;
-        free(__blkcache_storage);
-        __blkcache_storage = null;
-    }
-}
-
-
-// we expect this to be called with the lock in place
-void processGCMarks(BlkInfo* cache, scope rt.tlsgc.IsMarkedDg isMarked) nothrow
-{
-    // called after the mark routine to eliminate block cache data when it
-    // might be ready to sweep
-
-    debug(PRINTF) printf("processing GC Marks, %x\n", cache);
-    if (cache)
-    {
-        debug(PRINTF) foreach (i; 0 .. N_CACHE_BLOCKS)
-        {
-            printf("cache entry %d has base ptr %x\tsize %d\tflags %x\n", i, cache[i].base, cache[i].size, cache[i].attr);
-        }
-        auto cache_end = cache + N_CACHE_BLOCKS;
-        for (;cache < cache_end; ++cache)
-        {
-            if (cache.base != null && !isMarked(cache.base))
-            {
-                debug(PRINTF) printf("clearing cache entry at %x\n", cache.base);
-                cache.base = null; // clear that data.
-            }
-        }
-    }
-}
-
-unittest
-{
-    // Bugzilla 10701 - segfault in GC
-    ubyte[] result; result.length = 4096;
-    GC.free(result.ptr);
-    GC.collect();
-}
-
-/**
-  Get the cached block info of an interior pointer.  Returns null if the
-  interior pointer's block is not cached.
-
-  NOTE: The base ptr in this struct can be cleared asynchronously by the GC,
-        so any use of the returned BlkInfo should copy it and then check the
-        base ptr of the copy before actually using it.
-
-  TODO: Change this function so the caller doesn't have to be aware of this
-        issue.  Either return by value and expect the caller to always check
-        the base ptr as an indication of whether the struct is valid, or set
-        the BlkInfo as a side-effect and return a bool to indicate success.
-  */
-BlkInfo *__getBlkInfo(void *interior) nothrow
-{
-    BlkInfo *ptr = __blkcache;
-    version (single_cache)
-    {
-        if (ptr.base && ptr.base <= interior && (interior - ptr.base) < ptr.size)
-            return ptr;
-        return null; // not in cache.
-    }
-    else version (simple_cache)
-    {
-        foreach (i; 0..N_CACHE_BLOCKS)
-        {
-            if (ptr.base && ptr.base <= interior && (interior - ptr.base) < ptr.size)
-                return ptr;
-            ptr++;
-        }
-    }
-    else
-    {
-        // try to do a smart lookup, using __nextBlkIdx as the "head"
-        auto curi = ptr + __nextBlkIdx;
-        for (auto i = curi; i >= ptr; --i)
-        {
-            if (i.base && i.base <= interior && cast(size_t)(interior - i.base) < i.size)
-                return i;
-        }
-
-        for (auto i = ptr + N_CACHE_BLOCKS - 1; i > curi; --i)
-        {
-            if (i.base && i.base <= interior && cast(size_t)(interior - i.base) < i.size)
-                return i;
-        }
-    }
-    return null; // not in cache.
-}
-
-void __insertBlkInfoCache(BlkInfo bi, BlkInfo *curpos) nothrow
-{
-    version (single_cache)
-    {
-        *__blkcache = bi;
-    }
-    else
-    {
-        version (simple_cache)
-        {
-            if (curpos)
-                *curpos = bi;
-            else
-            {
-                // note, this is a super-simple algorithm that does not care about
-                // most recently used.  It simply uses a round-robin technique to
-                // cache block info.  This means that the ordering of the cache
-                // doesn't mean anything.  Certain patterns of allocation may
-                // render the cache near-useless.
-                __blkcache[__nextBlkIdx] = bi;
-                __nextBlkIdx = (__nextBlkIdx+1) & (N_CACHE_BLOCKS - 1);
-            }
-        }
-        else version (random_cache)
-        {
-            // strategy: if the block currently is in the cache, move the
-            // current block index to the a random element and evict that
-            // element.
-            auto cache = __blkcache;
-            if (!curpos)
-            {
-                __nextBlkIdx = (__nextRndNum = 1664525 * __nextRndNum + 1013904223) & (N_CACHE_BLOCKS - 1);
-                curpos = cache + __nextBlkIdx;
-            }
-            else
-            {
-                __nextBlkIdx = curpos - cache;
-            }
-            *curpos = bi;
-        }
-        else
-        {
-            //
-            // strategy: If the block currently is in the cache, swap it with
-            // the head element.  Otherwise, move the head element up by one,
-            // and insert it there.
-            //
-            auto cache = __blkcache;
-            if (!curpos)
-            {
-                __nextBlkIdx = (__nextBlkIdx+1) & (N_CACHE_BLOCKS - 1);
-                curpos = cache + __nextBlkIdx;
-            }
-            else if (curpos !is cache + __nextBlkIdx)
-            {
-                *curpos = cache[__nextBlkIdx];
-                curpos = cache + __nextBlkIdx;
-            }
-            *curpos = bi;
-        }
-    }
+    return attr;
 }
 
 /**
@@ -661,47 +253,37 @@ extern(C) void _d_arrayshrinkfit(const TypeInfo ti, void[] arr) nothrow
     auto size = tinext.tsize;                  // array element size
     auto cursize = arr.length * size;
     auto isshared = typeid(ti) is typeid(TypeInfo_Shared);
-    auto bic = isshared ? null : __getBlkInfo(arr.ptr);
-    auto info = bic ? *bic : GC.query(arr.ptr);
-    if (info.base && (info.attr & BlkAttr.APPENDABLE))
+
+    // fetch existing used size
+    auto oldArr = gc_getArrayUsed(arr.ptr, isshared);
+    if(oldArr.ptr is null)
+	// not a valid GC pointer
+	return;
+    // align the array.
+    oldArr = arr.ptr[0 .. oldArr.length - (arr.ptr - oldArr.ptr)];
+    if(oldArr.length <= cursize)
+	// invalid situation, or no change, can't shrink this.
+	return;
+    // destroy structs that become unused memory when array size is shrunk
+    if (typeid(tinext) is typeid(TypeInfo_Struct)) // avoid a complete dynamic type cast
     {
-        auto newsize = (arr.ptr - __arrayStart(info)) + cursize;
-
-        debug(PRINTF) printf("setting allocated size to %d\n", (arr.ptr - info.base) + cursize);
-
-        // destroy structs that become unused memory when array size is shrinked
-        if (typeid(tinext) is typeid(TypeInfo_Struct)) // avoid a complete dynamic type cast
-        {
-            auto sti = cast(TypeInfo_Struct)cast(void*)tinext;
-            if (sti.xdtor)
-            {
-                auto oldsize = __arrayAllocLength(info, tinext);
-                if (oldsize > cursize)
-                {
-                    try
-                    {
-                        finalize_array(arr.ptr + cursize, oldsize - cursize, sti);
-                    }
-                    catch (Exception e)
-                    {
-                        import core.exception : onFinalizeError;
-                        onFinalizeError(sti, e);
-                    }
-                }
-            }
-        }
-        // Note: Since we "assume" the append is safe, it means it is not shared.
-        // Since it is not shared, we also know it won't throw (no lock).
-        if (!__setArrayAllocLength(info, newsize, false, tinext))
-        {
-            import core.exception : onInvalidMemoryOperationError;
-            onInvalidMemoryOperationError();
-        }
-
-        // cache the block if not already done.
-        if (!isshared && !bic)
-            __insertBlkInfoCache(info, null);
+	auto sti = cast(TypeInfo_Struct)cast(void*)tinext;
+	if (sti.xdtor)
+	{
+	    // need to destroy the memory we are deallocating.
+	    try
+	    {
+		finalize_array(arr.ptr + cursize, oldArr.length - cursize, sti);
+	    }
+	    catch (Exception e)
+	    {
+		import core.exception : onFinalizeError;
+		onFinalizeError(sti, e);
+	    }
+	}
     }
+    // don't care if this fails. If it does, we aren't in a valid GC block anyway.
+    gc_shrinkArrayUsed(arr.ptr[0 .. cursize], oldArr.length, isshared);
 }
 
 package bool hasPostblit(in TypeInfo ti) nothrow pure
@@ -765,13 +347,13 @@ do
 {
     import core.stdc.string;
     import core.exception : onOutOfMemoryError;
+    //import core.stdc.stdio;
 
-    // step 1, get the block
+    // step 1 see if we can ensure the capactiy is valid in-place.
     auto isshared = typeid(ti) is typeid(TypeInfo_Shared);
-    auto bic = isshared ? null : __getBlkInfo((*p).ptr);
-    auto info = bic ? *bic : GC.query((*p).ptr);
     auto tinext = unqualify(ti.next);
     auto size = tinext.tsize;
+    //printf("about to do stuff, isshared=%d, amc=%p, info.base=%p, info.size=%ld, req=%ld, p.ptr=%p, p.size=%ld, used=%ld\n", cast(int)isshared, amc, info.base, info.size, newcapacity, (*p).ptr, (*p).length, info.getUsed);
     version (D_InlineAsm_X86)
     {
         size_t reqsize = void;
@@ -810,118 +392,54 @@ Loverflow:
     assert(0);
 Lcontinue:
 
-    // step 2, get the actual "allocated" size.  If the allocated size does not
-    // match what we expect, then we will need to reallocate anyways.
-
-    // TODO: this probably isn't correct for shared arrays
-    size_t curallocsize = void;
-    size_t curcapacity = void;
-    size_t offset = void;
-    size_t arraypad = void;
-    if (info.base && (info.attr & BlkAttr.APPENDABLE))
-    {
-        if (info.size <= 256)
-        {
-            arraypad = SMALLPAD + structTypeInfoSize(tinext);
-            curallocsize = *(cast(ubyte *)(info.base + info.size - arraypad));
-        }
-        else if (info.size < PAGESIZE)
-        {
-            arraypad = MEDPAD + structTypeInfoSize(tinext);
-            curallocsize = *(cast(ushort *)(info.base + info.size - arraypad));
-        }
-        else
-        {
-            curallocsize = *(cast(size_t *)(info.base));
-            arraypad = LARGEPAD;
-        }
-
-
-        offset = (*p).ptr - __arrayStart(info);
-        if (offset + (*p).length * size != curallocsize)
-        {
-            curcapacity = 0;
-        }
-        else
-        {
-            // figure out the current capacity of the block from the point
-            // of view of the array.
-            curcapacity = info.size - offset - arraypad;
-        }
-    }
-    else
-    {
-        curallocsize = curcapacity = offset = 0;
-    }
-    debug(PRINTF) printf("_d_arraysetcapacity, p = x%d,%d, newcapacity=%d, info.size=%d, reqsize=%d, curallocsize=%d, curcapacity=%d, offset=%d\n", (*p).ptr, (*p).length, newcapacity, info.size, reqsize, curallocsize, curcapacity, offset);
-
-    if (curcapacity >= reqsize)
-    {
-        // no problems, the current allocated size is large enough.
-        return curcapacity / size;
-    }
-
-    // step 3, try to extend the array in place.
-    if (info.size >= PAGESIZE && curcapacity != 0)
-    {
-        auto extendsize = reqsize + offset + LARGEPAD - info.size;
-        auto u = GC.extend(info.base, extendsize, extendsize);
-        if (u)
-        {
-            // extend worked, save the new current allocated size
-            if (bic)
-                bic.size = u; // update cache
-            curcapacity = u - offset - LARGEPAD;
-            return curcapacity / size;
-        }
-    }
-
-    // step 4, if extending doesn't work, allocate a new array with at least the requested allocated size.
     auto datasize = (*p).length * size;
-    // copy attributes from original block, or from the typeinfo if the
-    // original block doesn't exist.
-    info = __arrayAlloc(reqsize, info, ti, tinext);
-    if (info.base is null)
+    auto curCapacity = gc_reserveArrayCapacity((*p).ptr[0 .. datasize], reqsize, isshared);
+    if(curCapacity != 0)
+	// in-place worked!
+	return curCapacity / size;
+
+    if(reqsize <= datasize)
+	// requested size is less than array size, no need to malloc. But there
+	// is no capacity to return.
+	return 0;
+
+    // allocate a new block, to hold the data, and copy the existing data.
+    // TODO: this probably isn't correct for shared arrays
+    auto newarr = gc_malloc(reqsize, __typeAttrs(tinext) | BlkAttr.APPENDABLE, tinext);
+    if (!newarr)
         goto Loverflow;
     // copy the data over.
     // note that malloc will have initialized the data we did not request to 0.
-    auto tgt = __arrayStart(info);
-    memcpy(tgt, (*p).ptr, datasize);
+    if(datasize)
+    {
+	memcpy(newarr, (*p).ptr, datasize);
 
-    // handle postblit
-    __doPostblit(tgt, datasize, tinext);
+	// handle postblit
+	__doPostblit(newarr, datasize, tinext);
+    }
 
-    if (!(info.attr & BlkAttr.NO_SCAN))
+    if (tinext.flags & 1) // type contains pointers
     {
         // need to memset the newly requested data, except for the data that
         // malloc returned that we didn't request.
-        void *endptr = tgt + reqsize;
-        void *begptr = tgt + datasize;
+        void *endptr = newarr + reqsize;
+        void *begptr = newarr + datasize;
 
         // sanity check
         assert(endptr >= begptr);
         memset(begptr, 0, endptr - begptr);
     }
 
-    // set up the correct length
-    __setArrayAllocLength(info, datasize, isshared, tinext);
-    if (!isshared)
-        __insertBlkInfoCache(info, bic);
+    // set up the correct length. Note that because malloc automatically sets
+    // the used size based on the requested size, this is needed.
+    auto setUsedResult = gc_shrinkArrayUsed(newarr[0 .. datasize], reqsize, isshared);
+    assert(setUsedResult);
 
-    *p = (cast(void*)tgt)[0 .. (*p).length];
+    *p = newarr[0 .. (*p).length];
 
-    // determine the padding.  This has to be done manually because __arrayPad
-    // assumes you are not counting the pad size, and info.size does include
-    // the pad.
-    if (info.size <= 256)
-        arraypad = SMALLPAD + structTypeInfoSize(tinext);
-    else if (info.size < PAGESIZE)
-        arraypad = MEDPAD + structTypeInfoSize(tinext);
-    else
-        arraypad = LARGEPAD;
-
-    curcapacity = info.size - arraypad;
-    return curcapacity / size;
+    curCapacity = gc_reserveArrayCapacity(newarr[0 .. datasize], 0, isshared);
+    assert(curCapacity);
+    return curCapacity / size;
 }
 
 /**
@@ -982,15 +500,11 @@ Loverflow:
     assert(0);
 Lcontinue:
 
-    auto info = __arrayAlloc(size, ti, tinext);
-    if (!info.base)
+    auto p = gc_malloc(size, __typeAttrs(tinext) | BlkAttr.APPENDABLE, tinext);
+    if (!p)
         goto Loverflow;
-    debug(PRINTF) printf(" p = %p\n", info.base);
-    // update the length of the array
-    auto arrstart = __arrayStart(info);
-    auto isshared = typeid(ti) is typeid(TypeInfo_Shared);
-    __setArrayAllocLength(info, size, isshared, tinext);
-    return arrstart[0..length];
+    debug(PRINTF) printf(" p = %p\n", p);
+    return p[0 .. length];
 }
 
 /// ditto
@@ -1050,40 +564,12 @@ Params:
 Returns:
     newly allocated item
 */
-extern (C) void* _d_newitemU(scope const TypeInfo _ti) pure nothrow @weak
+extern (C) void* _d_newitemU(scope const TypeInfo _ti) nothrow @weak
 {
     auto ti = unqualify(_ti);
-    auto flags = !(ti.flags & 1) ? BlkAttr.NO_SCAN : 0;
-    immutable tiSize = structTypeInfoSize(ti);
+    auto flags = __typeAttrs(ti);
     immutable itemSize = ti.tsize;
-    immutable size = itemSize + tiSize;
-    if (tiSize)
-        flags |= BlkAttr.STRUCTFINAL | BlkAttr.FINALIZE;
-
-    auto blkInf = GC.qalloc(size, flags, ti);
-    auto p = blkInf.base;
-
-    if (tiSize)
-    {
-        // the GC might not have cleared the padding area in the block
-        *cast(TypeInfo*)(p + (itemSize & ~(size_t.sizeof - 1))) = null;
-        *cast(TypeInfo*)(p + blkInf.size - tiSize) = cast() ti;
-    }
-
-    return p;
-}
-
-debug(PRINTF)
-{
-    extern(C) void printArrayCache()
-    {
-        auto ptr = __blkcache;
-        printf("CACHE: \n");
-        foreach (i; 0 .. N_CACHE_BLOCKS)
-        {
-            printf("  %d\taddr:% .8x\tsize:% .10d\tflags:% .8x\n", i, ptr[i].base, ptr[i].size, ptr[i].attr);
-        }
-    }
+    return GC.malloc(ti.tsize, flags, ti);
 }
 
 /**
@@ -1139,99 +625,7 @@ extern (C) CollectHandler rt_getCollectHandler()
     return collectHandler;
 }
 
-
-/**
- *
- */
-extern (C) int rt_hasFinalizerInSegment(void* p, size_t size, uint attr, scope const(void)[] segment) nothrow
-{
-    if (attr & BlkAttr.STRUCTFINAL)
-    {
-        if (attr & BlkAttr.APPENDABLE)
-            return hasArrayFinalizerInSegment(p, size, segment);
-        return hasStructFinalizerInSegment(p, size, segment);
-    }
-
-    // otherwise class
-    auto ppv = cast(void**) p;
-    if (!p || !*ppv)
-        return false;
-
-    auto c = *cast(ClassInfo*)*ppv;
-    do
-    {
-        auto pf = c.destructor;
-        if (cast(size_t)(pf - segment.ptr) < segment.length) return true;
-    }
-    while ((c = c.base) !is null);
-
-    return false;
-}
-
-int hasStructFinalizerInSegment(void* p, size_t size, in void[] segment) nothrow
-{
-    if (!p)
-        return false;
-
-    auto ti = *cast(TypeInfo_Struct*)(p + size - size_t.sizeof);
-    return cast(size_t)(cast(void*)ti.xdtor - segment.ptr) < segment.length;
-}
-
-int hasArrayFinalizerInSegment(void* p, size_t size, in void[] segment) nothrow
-{
-    if (!p)
-        return false;
-
-    TypeInfo_Struct si = void;
-    if (size < PAGESIZE)
-        si = *cast(TypeInfo_Struct*)(p + size - size_t.sizeof);
-    else
-        si = *cast(TypeInfo_Struct*)(p + size_t.sizeof);
-
-    return cast(size_t)(cast(void*)si.xdtor - segment.ptr) < segment.length;
-}
-
 debug (VALGRIND) import etc.valgrind.valgrind;
-
-// called by the GC
-void finalize_array2(void* p, size_t size) nothrow
-{
-    debug(PRINTF) printf("rt_finalize_array2(p = %p)\n", p);
-
-    TypeInfo_Struct si = void;
-    debug (VALGRIND)
-    {
-        auto block = p[0..size];
-        disableAddrReportingInRange(block);
-    }
-    if (size <= 256)
-    {
-        si = *cast(TypeInfo_Struct*)(p + size - size_t.sizeof);
-        size = *cast(ubyte*)(p + size - size_t.sizeof - SMALLPAD);
-    }
-    else if (size < PAGESIZE)
-    {
-        si = *cast(TypeInfo_Struct*)(p + size - size_t.sizeof);
-        size = *cast(ushort*)(p + size - size_t.sizeof - MEDPAD);
-    }
-    else
-    {
-        si = *cast(TypeInfo_Struct*)(p + size_t.sizeof);
-        size = *cast(size_t*)p;
-        p += LARGEPREFIX;
-    }
-    debug (VALGRIND) enableAddrReportingInRange(block);
-
-    try
-    {
-        finalize_array(p, size, si);
-    }
-    catch (Exception e)
-    {
-        import core.exception : onFinalizeError;
-        onFinalizeError(si, e);
-    }
-}
 
 void finalize_array(void* p, size_t size, const TypeInfo_Struct si)
 {
@@ -1247,11 +641,10 @@ void finalize_array(void* p, size_t size, const TypeInfo_Struct si)
 }
 
 // called by the GC
-void finalize_struct(void* p, size_t size) nothrow
+void finalize_struct(void* p, TypeInfo_Struct ti) nothrow
 {
     debug(PRINTF) printf("finalize_struct(p = %p)\n", p);
 
-    auto ti = *cast(TypeInfo_Struct*)(p + size - size_t.sizeof);
     try
     {
         ti.destroy(p); // call destructor
@@ -1314,15 +707,58 @@ extern (C) void rt_finalize(void* p, bool det = true) nothrow
     rt_finalize2(p, det, true);
 }
 
-extern (C) void rt_finalizeFromGC(void* p, size_t size, uint attr) nothrow
+// called by the GC
+void finalize_array2(void* p, size_t size, TypeInfo_Struct si) nothrow
+{
+    debug(PRINTF) printf("rt_finalize_array2(p = %p)\n", p);
+    try
+    {
+        finalize_array(p, size, si);
+    }
+    catch (Exception e)
+    {
+        import core.exception : onFinalizeError;
+        onFinalizeError(si, e);
+    }
+}
+
+/**
+ *
+ */
+extern (C) int rt_hasFinalizerInSegment(void* p, size_t size, void *context, scope const(void)[] segment) nothrow
+{
+    // if the context is not-null, then this is a struct typeinfo
+    if (context)
+    {
+        auto ti = cast(TypeInfo_Struct)context;
+        return cast(size_t)(cast(void*)ti.xdtor - segment.ptr) < segment.length;
+    }
+
+    // otherwise class, finalizer is in the block itself.
+    auto ppv = cast(void**) p;
+    if (!p || !*ppv)
+        return false;
+
+    auto c = *cast(ClassInfo*)*ppv;
+    do
+    {
+        auto pf = c.destructor;
+        if (cast(size_t)(pf - segment.ptr) < segment.length) return true;
+    }
+    while ((c = c.base) !is null);
+
+    return false;
+}
+
+extern (C) void rt_finalizeFromGC(void* p, size_t size, uint attr, void *context) nothrow
 {
     // to verify: reset memory necessary?
-    if (!(attr & BlkAttr.STRUCTFINAL))
+    if (!context)
         rt_finalize2(p, false, false); // class
     else if (attr & BlkAttr.APPENDABLE)
-        finalize_array2(p, size); // array of structs
+        finalize_array2(p, size, cast(TypeInfo_Struct)context); // array of structs
     else
-        finalize_struct(p, size); // struct
+        finalize_struct(p, cast(TypeInfo_Struct)context); // struct
 }
 
 
@@ -1371,8 +807,7 @@ do
     if (newlength <= (*p).length)
     {
         *p = (*p)[0 .. newlength];
-        void* newdata = (*p).ptr;
-        return newdata[0 .. newlength];
+        return *p;
     }
     auto tinext = unqualify(ti.next);
     size_t sizeelem = tinext.tsize;
@@ -1421,118 +856,37 @@ do
 
     if (!(*p).ptr)
     {
+	assert((*p).length == 0);
         // pointer was null, need to allocate
-        auto info = __arrayAlloc(newsize, ti, tinext);
-        if (info.base is null)
+        auto newArr = gc_malloc(newsize, __typeAttrs(tinext) | BlkAttr.APPENDABLE, tinext);
+        if (!newArr)
         {
             onOutOfMemoryError();
             assert(0);
         }
-        __setArrayAllocLength(info, newsize, isshared, tinext);
-        if (!isshared)
-            __insertBlkInfoCache(info, null);
-        void* newdata = cast(byte *)__arrayStart(info);
-        memset(newdata, 0, newsize);
-        *p = newdata[0 .. newlength];
+        memset(newArr, 0, newsize);
+        *p = newArr[0 .. newlength];
         return *p;
     }
 
     const size_t size = (*p).length * sizeelem;
-    auto   bic = isshared ? null : __getBlkInfo((*p).ptr);
-    auto   info = bic ? *bic : GC.query((*p).ptr);
 
     /* Attempt to extend past the end of the existing array.
      * If not possible, allocate new space for entire array and copy.
      */
-    bool allocateAndCopy = false;
     void* newdata = (*p).ptr;
-    if (info.base && (info.attr & BlkAttr.APPENDABLE))
+    if (!gc_expandArrayUsed(newdata[0 .. size], newsize, isshared))
     {
-        // calculate the extent of the array given the base.
-        const size_t offset = (*p).ptr - __arrayStart(info);
-        if (info.size >= PAGESIZE)
-        {
-            // size of array is at the front of the block
-            if (!__setArrayAllocLength(info, newsize + offset, isshared, tinext, size + offset))
-            {
-                // check to see if it failed because there is not
-                // enough space
-                if (*(cast(size_t*)info.base) == size + offset)
-                {
-                    // not enough space, try extending
-                    auto extendsize = newsize + offset + LARGEPAD - info.size;
-                    auto u = GC.extend(info.base, extendsize, extendsize);
-                    if (u)
-                    {
-                        // extend worked, now try setting the length
-                        // again.
-                        info.size = u;
-                        if (__setArrayAllocLength(info, newsize + offset, isshared, tinext, size + offset))
-                        {
-                            if (!isshared)
-                                __insertBlkInfoCache(info, bic);
-                            memset(newdata + size, 0, newsize - size);
-                            *p = newdata[0 .. newlength];
-                            return *p;
-                        }
-                    }
-                }
-
-                // couldn't do it, reallocate
-                allocateAndCopy = true;
-            }
-            else if (!isshared && !bic)
-            {
-                // add this to the cache, it wasn't present previously.
-                __insertBlkInfoCache(info, null);
-            }
-        }
-        else if (!__setArrayAllocLength(info, newsize + offset, isshared, tinext, size + offset))
-        {
-            // could not resize in place
-            allocateAndCopy = true;
-        }
-        else if (!isshared && !bic)
-        {
-            // add this to the cache, it wasn't present previously.
-            __insertBlkInfoCache(info, null);
-        }
-    }
-    else
-        allocateAndCopy = true;
-
-    if (allocateAndCopy)
-    {
-        if (info.base)
-        {
-            if (bic)
-            {
-                // a chance that flags have changed since this was cached, we should fetch the most recent flags
-                info.attr = GC.getAttr(info.base) | BlkAttr.APPENDABLE;
-            }
-            info = __arrayAlloc(newsize, info, ti, tinext);
-        }
-        else
-        {
-            info = __arrayAlloc(newsize, ti, tinext);
-        }
-
-        if (info.base is null)
+	newdata = gc_malloc(newsize, __typeAttrs(tinext) | BlkAttr.APPENDABLE, tinext);
+        if (!newdata)
         {
             onOutOfMemoryError();
             assert(0);
         }
 
-        __setArrayAllocLength(info, newsize, isshared, tinext);
-        if (!isshared)
-            __insertBlkInfoCache(info, bic);
-        newdata = cast(byte *)__arrayStart(info);
         newdata[0 .. size] = (*p).ptr[0 .. size];
 
-        /* Do postblit processing, as we are making a copy and the
-         * original array may have references.
-         * Note that this may throw.
-         */
+        // Do postblit processing, as we are making a copy
         __doPostblit(newdata, size, tinext);
     }
 
@@ -1564,8 +918,7 @@ do
     if (newlength <= (*p).length)
     {
         *p = (*p)[0 .. newlength];
-        void* newdata = (*p).ptr;
-        return newdata[0 .. newlength];
+        return *p;
     }
     auto tinext = unqualify(ti.next);
     size_t sizeelem = tinext.tsize;
@@ -1631,119 +984,37 @@ do
 
     if (!(*p).ptr)
     {
+	assert((*p).length == 0);
         // pointer was null, need to allocate
-        auto info = __arrayAlloc(newsize, ti, tinext);
-        if (info.base is null)
+        auto newArr = gc_malloc(newsize, __typeAttrs(tinext) | BlkAttr.APPENDABLE, tinext);
+        if (!newArr)
         {
             onOutOfMemoryError();
             assert(0);
         }
-        __setArrayAllocLength(info, newsize, isshared, tinext);
-        if (!isshared)
-            __insertBlkInfoCache(info, null);
-        void* newdata = cast(byte *)__arrayStart(info);
-        doInitialize(newdata, newdata + newsize, tinext.initializer);
-        *p = newdata[0 .. newlength];
+        doInitialize(newArr, newArr + newsize, tinext.initializer);
+        *p = newArr[0 .. newlength];
         return *p;
     }
 
     const size_t size = (*p).length * sizeelem;
-    auto   bic = isshared ? null : __getBlkInfo((*p).ptr);
-    auto   info = bic ? *bic : GC.query((*p).ptr);
 
     /* Attempt to extend past the end of the existing array.
      * If not possible, allocate new space for entire array and copy.
      */
-    bool allocateAndCopy = false;
     void* newdata = (*p).ptr;
-
-    if (info.base && (info.attr & BlkAttr.APPENDABLE))
+    if (!gc_expandArrayUsed(newdata[0 .. size], newsize, isshared))
     {
-        // calculate the extent of the array given the base.
-        const size_t offset = (*p).ptr - __arrayStart(info);
-        if (info.size >= PAGESIZE)
-        {
-            // size of array is at the front of the block
-            if (!__setArrayAllocLength(info, newsize + offset, isshared, tinext, size + offset))
-            {
-                // check to see if it failed because there is not
-                // enough space
-                if (*(cast(size_t*)info.base) == size + offset)
-                {
-                    // not enough space, try extending
-                    auto extendsize = newsize + offset + LARGEPAD - info.size;
-                    auto u = GC.extend(info.base, extendsize, extendsize);
-                    if (u)
-                    {
-                        // extend worked, now try setting the length
-                        // again.
-                        info.size = u;
-                        if (__setArrayAllocLength(info, newsize + offset, isshared, tinext, size + offset))
-                        {
-                            if (!isshared)
-                                __insertBlkInfoCache(info, bic);
-                            doInitialize(newdata + size, newdata + newsize, tinext.initializer);
-                            *p = newdata[0 .. newlength];
-                            return *p;
-                        }
-                    }
-                }
-
-                // couldn't do it, reallocate
-                allocateAndCopy = true;
-            }
-            else if (!isshared && !bic)
-            {
-                // add this to the cache, it wasn't present previously.
-                __insertBlkInfoCache(info, null);
-            }
-        }
-        else if (!__setArrayAllocLength(info, newsize + offset, isshared, tinext, size + offset))
-        {
-            // could not resize in place
-            allocateAndCopy = true;
-        }
-        else if (!isshared && !bic)
-        {
-            // add this to the cache, it wasn't present previously.
-            __insertBlkInfoCache(info, null);
-        }
-    }
-    else
-        allocateAndCopy = true;
-
-    if (allocateAndCopy)
-    {
-        if (info.base)
-        {
-            if (bic)
-            {
-                // a chance that flags have changed since this was cached, we should fetch the most recent flags
-                info.attr = GC.getAttr(info.base) | BlkAttr.APPENDABLE;
-            }
-            info = __arrayAlloc(newsize, info, ti, tinext);
-        }
-        else
-        {
-            info = __arrayAlloc(newsize, ti, tinext);
-        }
-
-        if (info.base is null)
+	newdata = gc_malloc(newsize, __typeAttrs(tinext) | BlkAttr.APPENDABLE, tinext);
+        if (!newdata)
         {
             onOutOfMemoryError();
             assert(0);
         }
 
-        __setArrayAllocLength(info, newsize, isshared, tinext);
-        if (!isshared)
-            __insertBlkInfoCache(info, bic);
-        newdata = cast(byte *)__arrayStart(info);
         newdata[0 .. size] = (*p).ptr[0 .. size];
 
-        /* Do postblit processing, as we are making a copy and the
-         * original array may have references.
-         * Note that this may throw.
-         */
+        // Do postblit processing, as we are making a copy
         __doPostblit(newdata, size, tinext);
     }
 
@@ -1862,93 +1133,33 @@ byte[] _d_arrayappendcTX(const TypeInfo ti, return scope ref byte[] px, size_t n
     auto tinext = unqualify(ti.next);
     auto sizeelem = tinext.tsize;              // array element size
     auto isshared = typeid(ti) is typeid(TypeInfo_Shared);
-    auto bic = isshared ? null : __getBlkInfo(px.ptr);
-    auto info = bic ? *bic : GC.query(px.ptr);
     auto length = px.length;
     auto newlength = length + n;
     auto newsize = newlength * sizeelem;
     auto size = length * sizeelem;
-    size_t newcap = void; // for scratch space
+    //import core.stdc.stdio;
+    //printf("about to do stuff, isshared=%d, amc=%p, info.base=%p, info.size=%ld, req=%ld, p.ptr=%p, p.size=%ld, used=%ld\n", cast(int)isshared, amc, info.base, info.size, n, px.ptr, px.length, info.getUsed);
 
-    // calculate the extent of the array given the base.
-    size_t offset = cast(void*)px.ptr - __arrayStart(info);
-    if (info.base && (info.attr & BlkAttr.APPENDABLE))
+    if(!gc_expandArrayUsed(px.ptr[0 .. size], newsize, isshared))
     {
-        if (info.size >= PAGESIZE)
-        {
-            // size of array is at the front of the block
-            if (!__setArrayAllocLength(info, newsize + offset, isshared, tinext, size + offset))
-            {
-                // check to see if it failed because there is not
-                // enough space
-                newcap = newCapacity(newlength, sizeelem);
-                if (*(cast(size_t*)info.base) == size + offset)
-                {
-                    // not enough space, try extending
-                    auto extendoffset = offset + LARGEPAD - info.size;
-                    auto u = GC.extend(info.base, newsize + extendoffset, newcap + extendoffset);
-                    if (u)
-                    {
-                        // extend worked, now try setting the length
-                        // again.
-                        info.size = u;
-                        if (__setArrayAllocLength(info, newsize + offset, isshared, tinext, size + offset))
-                        {
-                            if (!isshared)
-                                __insertBlkInfoCache(info, bic);
-                            goto L1;
-                        }
-                    }
-                }
-
-                // couldn't do it, reallocate
-                goto L2;
-            }
-            else if (!isshared && !bic)
-            {
-                __insertBlkInfoCache(info, null);
-            }
-        }
-        else if (!__setArrayAllocLength(info, newsize + offset, isshared, tinext, size + offset))
-        {
-            // could not resize in place
-            newcap = newCapacity(newlength, sizeelem);
-            goto L2;
-        }
-        else if (!isshared && !bic)
-        {
-            __insertBlkInfoCache(info, null);
-        }
-    }
-    else
-    {
-        // not appendable or is null
-        newcap = newCapacity(newlength, sizeelem);
-        if (info.base)
-        {
-    L2:
-            if (bic)
-            {
-                // a chance that flags have changed since this was cached, we should fetch the most recent flags
-                info.attr = GC.getAttr(info.base) | BlkAttr.APPENDABLE;
-            }
-            info = __arrayAlloc(newcap, info, ti, tinext);
-        }
-        else
-        {
-            info = __arrayAlloc(newcap, ti, tinext);
-        }
-        __setArrayAllocLength(info, newsize, isshared, tinext);
-        if (!isshared)
-            __insertBlkInfoCache(info, bic);
-        auto newdata = cast(byte *)__arrayStart(info);
-        memcpy(newdata, px.ptr, length * sizeelem);
+	// could not set the size, we must reallocate.
+	auto newcap = newCapacity(newlength, sizeelem);
+        auto newArr = gc_malloc(newcap, __typeAttrs(tinext) | BlkAttr.APPENDABLE, tinext);
+	if(newsize != newcap)
+	{
+	    // need to adjust the used space, as it defaults to the size of the
+	    // requested data.
+	    auto setUsedResult = gc_shrinkArrayUsed(newArr[0 .. newsize], newcap, isshared);
+	    assert(setUsedResult);
+	}
+        memcpy(newArr, px.ptr, size);
         // do postblit processing
-        __doPostblit(newdata, length * sizeelem, tinext);
-        (cast(void **)(&px))[1] = newdata;
+        __doPostblit(newArr, size, tinext);
+        px = cast(byte[])newArr[0 .. newlength];
+        return px;
     }
 
-  L1:
+    // we were able to append in-place, just update the length.
     *cast(size_t *)&px = newlength;
     return px;
 }
@@ -2123,20 +1334,15 @@ void* _d_arrayliteralTX(const TypeInfo ti, size_t length) @weak
 {
     auto tinext = unqualify(ti.next);
     auto sizeelem = tinext.tsize;              // array element size
-    void* result;
 
     debug(PRINTF) printf("_d_arrayliteralTX(sizeelem = %d, length = %d)\n", sizeelem, length);
     if (length == 0 || sizeelem == 0)
-        result = null;
+        return null;
     else
     {
         auto allocsize = length * sizeelem;
-        auto info = __arrayAlloc(allocsize, ti, tinext);
-        auto isshared = typeid(ti) is typeid(TypeInfo_Shared);
-        __setArrayAllocLength(info, allocsize, isshared, tinext);
-        result = __arrayStart(info);
+        return gc_malloc(allocsize, __typeAttrs(tinext) | BlkAttr.APPENDABLE, tinext);
     }
-    return result;
 }
 
 
@@ -2310,54 +1516,59 @@ unittest
 unittest
 {
     // https://issues.dlang.org/show_bug.cgi?id=13878
-    auto arr = new ubyte[1];
+    // NOTE: the original code here was testing for something that isn't really
+    // a problem. In practice, almost no code is setting or clearing scan bits.
+    // However, we do need to ensure that if we clear the no scan bit, and then
+    // append to it as a pointer-containing type, the new block keeps data
+    // sane.
+    auto arr = new size_t[2];
     auto info = GC.query(arr.ptr);
     assert(info.attr & BlkAttr.NO_SCAN); // should be NO_SCAN
     arr ~= 0; // ensure array is inserted into cache
     debug(SENTINEL) {} else
         assert(arr.ptr is info.base);
     GC.clrAttr(arr.ptr, BlkAttr.NO_SCAN); // remove the attribute
-    auto arr2 = arr[0..1];
+    void*[] arr2 = cast(void*[])arr[0..1];
     assert(arr2.capacity == 0); // cannot append
-    arr2 ~= 0;
-    assert(arr2.ptr !is arr.ptr);
+    arr2 ~= null;
+    assert(cast(void*)arr2.ptr !is cast(void*)arr.ptr);
     info = GC.query(arr2.ptr);
     assert(!(info.attr & BlkAttr.NO_SCAN)); // ensure attribute sticks
 
     // do the same via setting length
-    arr = new ubyte[1];
+    arr = new size_t[2];
     arr ~= 0; // ensure array is inserted into cache
     GC.clrAttr(arr.ptr, BlkAttr.NO_SCAN); // remove the attribute
-    arr2 = arr[0..1];
+    arr2 = cast(void*[])arr[0..1];
     assert(arr2.capacity == 0);
     arr2.length += 1;
-    assert(arr2.ptr !is arr.ptr); // reallocated
+    assert(cast(void*)arr2.ptr !is cast(void*)arr.ptr); // reallocated
     info = GC.query(arr2.ptr);
     assert(!(info.attr & BlkAttr.NO_SCAN)); // ensure attribute sticks
 
     // do the same for char[] since we need a type with an initializer to test certain runtime functions
-    auto carr = new char[1];
+    auto carr = new char[size_t.sizeof][2];
     info = GC.query(carr.ptr);
     assert(info.attr & BlkAttr.NO_SCAN); // should be NO_SCAN
-    carr ~= 0; // ensure array is inserted into cache
+    carr ~= carr[0]; // ensure array is inserted into cache
     debug(SENTINEL) {} else
         assert(carr.ptr is info.base);
     GC.clrAttr(carr.ptr, BlkAttr.NO_SCAN); // remove the attribute
-    auto carr2 = carr[0..1];
+    auto carr2 = (cast(void*[])carr)[0..1];
     assert(carr2.capacity == 0); // cannot append
-    carr2 ~= 0;
-    assert(carr2.ptr !is carr.ptr);
+    carr2 ~= null;
+    assert(cast(void*)carr2.ptr !is cast(void*)carr.ptr);
     info = GC.query(carr2.ptr);
     assert(!(info.attr & BlkAttr.NO_SCAN)); // ensure attribute sticks
 
     // do the same via setting length
-    carr = new char[1];
-    carr ~= 0; // ensure array is inserted into cache
+    carr = new char[size_t.sizeof][2];
+    carr ~= carr[0]; // ensure array is inserted into cache
     GC.clrAttr(carr.ptr, BlkAttr.NO_SCAN); // remove the attribute
-    carr2 = carr[0..1];
+    carr2 = (cast(void*[])carr)[0..1];
     assert(carr2.capacity == 0);
     carr2.length += 1;
-    assert(carr2.ptr !is carr.ptr); // reallocated
+    assert(cast(void*)carr2.ptr !is cast(void*)carr.ptr); // reallocated
     info = GC.query(carr2.ptr);
     assert(!(info.attr & BlkAttr.NO_SCAN)); // ensure attribute sticks
 }
@@ -2503,7 +1714,7 @@ unittest
     GC.free(larr1);
 
     auto larr2 = new S[255];
-    if (cast(void*)larr1 is cast(void*)larr2.ptr - LARGEPREFIX) // reusage not guaranteed
+    if (cast(void*)larr1 is cast(void*)larr2.ptr - 16) // reusage not guaranteed
     {
         auto ptr = cast(S**)larr1;
         assert(ptr[0] != p1); // 16 bytes array header

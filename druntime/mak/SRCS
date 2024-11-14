@@ -78,8 +78,10 @@ SRCS=\
 	src\core\internal\gc\pooltable.d \
 	src\core\internal\gc\proxy.d \
 	src\core\internal\gc\impl\conservative\gc.d \
+	src\core\internal\gc\impl\conservative\blkcache.d \
 	src\core\internal\gc\impl\manual\gc.d \
 	src\core\internal\gc\impl\proto\gc.d \
+	src\core\internal\gc\impl\sdc\gc.d \
 	\
 	src\core\internal\util\array.d \
 	src\core\internal\util\math.d \

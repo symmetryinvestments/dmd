@@ -37,6 +37,9 @@ extern (C)
     // do not import GC modules, they might add a dependency to this whole module
     void _d_register_conservative_gc();
     void _d_register_manual_gc();
+    void _d_register_sdc_gc();
+    void thread_scanAll_C();
+    void __sd_gc_finalize();
 
     // if you don't want to include the default GCs, replace during link by another implementation
     void* register_default_gcs() @weak
@@ -46,7 +49,10 @@ extern (C)
         // avoid being optimized away
         auto reg1 = &_d_register_conservative_gc;
         auto reg2 = &_d_register_manual_gc;
-        return reg1 < reg2 ? reg1 : reg2;
+        auto reg3 = &_d_register_sdc_gc;
+        auto reg4 = &thread_scanAll_C;
+        auto reg5 = &__sd_gc_finalize;
+        return reg1 < reg2 ? reg1 : reg2 < reg3 ? reg2 : reg3 < reg4 ? reg3 : reg4 < reg5 ? reg4 : reg5;
     }
 
     void gc_init()
@@ -173,7 +179,7 @@ extern (C)
 
     size_t gc_extend( void* p, size_t mx, size_t sz, const scope TypeInfo ti = null ) nothrow
     {
-        return instance.extend( p, mx, sz,ti );
+        return instance.extend( p, mx, sz );
     }
 
     size_t gc_reserve( size_t sz ) nothrow
@@ -284,5 +290,25 @@ extern (C)
             _instance = proxiedGC;
             proxiedGC = null;
         }
+    }
+
+    void[] gc_getArrayUsed(void *ptr, bool atomic) nothrow @nogc
+    {
+        return instance.getArrayUsed(ptr, atomic);
+    }
+
+    bool gc_expandArrayUsed(void[] slice, size_t newUsed, bool atomic) nothrow
+    {
+        return instance.expandArrayUsed(slice, newUsed, atomic);
+    }
+
+    size_t gc_reserveArrayCapacity(void[] slice, size_t request, bool atomic) nothrow @safe
+    {
+        return instance.reserveArrayCapacity(slice, request, atomic);
+    }
+
+    bool gc_shrinkArrayUsed(void[] slice, size_t existingUsed, bool atomic) nothrow
+    {
+	return instance.shrinkArrayUsed(slice, existingUsed, atomic);
     }
 }
