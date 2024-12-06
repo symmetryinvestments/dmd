@@ -53,6 +53,7 @@ extern(C) nothrow {
         void[] __sd_gc_get_allocation_slice(void *ptr) @nogc;
         void __sd_gc_add_roots(void[] range) @nogc;
         void __sd_gc_remove_roots(void *ptr) @nogc;
+        void __sd_gc_set_scanning_thread_count(uint nThreads) @nogc;
 
         // hook to druntime finalization.
         void rt_finalize2(void* p, bool det, bool resetMemory) nothrow;
@@ -140,6 +141,11 @@ private GC initialize()
 {
     import core.stdc.stdio;
     printf("using SDC GC!\n");
+    // check the config to see if we should set the thread count for scanning.
+    import core.gc.config;
+    // ignore the thread count if it's the default.
+    if (config.parallel != typeof(config).init.parallel)
+        __sd_gc_set_scanning_thread_count(config.parallel + 1);
     return instance;
 }
 
