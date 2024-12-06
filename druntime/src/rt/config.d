@@ -46,7 +46,7 @@ module rt.config;
 // put each variable in its own COMDAT by making them template instances
 template rt_envvars_enabled()
 {
-    extern(C) pragma(mangle, "rt_envvars_enabled") __gshared bool rt_envvars_enabled = false;
+    extern(C) pragma(mangle, "rt_envvars_enabled") __gshared bool rt_envvars_enabled = true;
 }
 template rt_cmdline_enabled()
 {
