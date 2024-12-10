@@ -8606,6 +8606,7 @@ struct Id final
     static Identifier* va_start;
     static Identifier* std;
     static Identifier* core;
+    static Identifier* internal;
     static Identifier* config;
     static Identifier* c_complex_float;
     static Identifier* c_complex_double;
@@ -8691,6 +8692,7 @@ struct Id final
     static Identifier* isRef;
     static Identifier* isOut;
     static Identifier* isLazy;
+    static Identifier* isCOMClass;
     static Identifier* hasMember;
     static Identifier* identifier;
     static Identifier* fullyQualifiedName;

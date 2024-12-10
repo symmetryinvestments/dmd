@@ -389,6 +389,7 @@ immutable Msgtable[] msgtable =
     // Builtin functions
     { "std" },
     { "core" },
+    { "internal" },
     { "config" },
     { "c_complex_float" },
     { "c_complex_double" },
@@ -481,6 +482,7 @@ immutable Msgtable[] msgtable =
     { "isRef" },
     { "isOut" },
     { "isLazy" },
+    { "isCOMClass" },
     { "hasMember" },
     { "identifier" },
     { "fullyQualifiedName" },
